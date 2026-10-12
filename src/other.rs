@@ -5,10 +5,13 @@ use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use crate::{Error, McpServer, OpenCodeV2, RunRequest, RunResult, TokenUsage, ToolPolicy};
+use crate::{
+    AgentEvent, Error, EventHandler, McpServer, OpenCodeV2, RunRequest, RunResult, TokenUsage,
+    ToolPolicy,
+};
 
 /// An adapter error with the selected provider preserved for callers.
 #[derive(Debug, thiserror::Error)]
@@ -145,15 +148,24 @@ impl AgentCli {
     }
 
     async fn run_claude(&self, request: RunRequest) -> Result<RunResult, Error> {
+        let streaming = request.on_event.is_some();
         let mut command = Command::new(&self.binary);
-        command.args([
-            "-p",
-            "--output-format",
-            "json",
-            "--no-session-persistence",
-            "--setting-sources",
-            "local",
-        ]);
+        command.args(["-p", "--output-format"]);
+        if streaming {
+            command.args(["stream-json", "--verbose", "--include-partial-messages"]);
+        } else {
+            command.arg("json");
+        }
+        command.args(["--setting-sources", "local"]);
+        match (&request.resume, request.persist_session) {
+            (Some(session), _) => {
+                command.arg("--resume").arg(session);
+            }
+            (None, false) => {
+                command.arg("--no-session-persistence");
+            }
+            (None, true) => {}
+        }
         claude_tools(&mut command, &request);
         if let Some(system) = request
             .system_prompt
@@ -180,9 +192,37 @@ impl AgentCli {
             // caller's environment so it cannot be overridden.
             command.env("CLAUDE_CODE_DISABLE_ATTACHMENTS", "1");
         }
-        let (output, duration) = capture(command, Some(&request.prompt), request.timeout).await?;
+        let handler = request.on_event.clone();
+        let on_line = move |line: &str| {
+            if let Some(handler) = &handler {
+                claude_event(handler, line);
+            }
+        };
+        let (output, duration) = capture(
+            command,
+            Some(&request.prompt),
+            request.timeout,
+            streaming.then_some(&on_line as &(dyn Fn(&str) + Send + Sync)),
+        )
+        .await?;
         let stderr_tail = stderr_tail(&output.stderr);
-        let envelope: Value = match serde_json::from_slice(&output.stdout) {
+        if stderr_tail.contains("No conversation found") {
+            return Err(Error::SessionNotFound(
+                request.resume.clone().unwrap_or_default(),
+            ));
+        }
+        let parsed = if streaming {
+            // The last `result` line carries the same envelope as `--output-format json`.
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .rev()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|v| v["type"] == "result")
+                .ok_or_else(|| serde_json::Error::io(std::io::Error::other("no result line")))
+        } else {
+            serde_json::from_slice(&output.stdout)
+        };
+        let envelope: Value = match parsed {
             Ok(value) => value,
             Err(error) => {
                 check_status(&output, &stderr_tail)?;
@@ -248,15 +288,20 @@ impl AgentCli {
             None
         };
         let mut command = Command::new(&self.binary);
+        command.arg("exec");
+        if request.resume.is_some() {
+            command.arg("resume");
+        }
+        // `-c sandbox_mode` works for `exec` and `exec resume` (which has no `-s`).
+        command.args(["--skip-git-repo-check", "-c", "sandbox_mode=\"read-only\""]);
+        if request.resume.is_none() {
+            command.args(["--color", "never"]);
+            if !request.persist_session {
+                command.arg("--ephemeral");
+            }
+        }
         command
             .args([
-                "exec",
-                "--skip-git-repo-check",
-                "-s",
-                "read-only",
-                "--color",
-                "never",
-                "--ephemeral",
                 "--disable",
                 "hooks",
                 "-c",
@@ -288,10 +333,35 @@ impl AgentCli {
                 .arg("-c")
                 .arg(format!("developer_instructions={}", toml_string(system)));
         }
+        if let Some(session) = &request.resume {
+            command.arg(session);
+        }
         command.arg("-");
         configure(&mut command, &request, true);
-        let (output, duration) = capture(command, Some(&request.prompt), request.timeout).await?;
+        let handler = request.on_event.clone();
+        let on_line = move |line: &str| {
+            if let Some(handler) = &handler {
+                codex_event(handler, line);
+            }
+        };
+        let (output, duration) = capture(
+            command,
+            Some(&request.prompt),
+            request.timeout,
+            request
+                .on_event
+                .is_some()
+                .then_some(&on_line as &(dyn Fn(&str) + Send + Sync)),
+        )
+        .await?;
         let stderr_tail = stderr_tail(&output.stderr);
+        if stderr_tail.contains("no rollout found")
+            || String::from_utf8_lossy(&output.stdout).contains("no rollout found")
+        {
+            return Err(Error::SessionNotFound(
+                request.resume.clone().unwrap_or_default(),
+            ));
+        }
         check_status(&output, &stderr_tail)?;
         let mut text = None;
         let mut session_id = None;
@@ -343,6 +413,9 @@ impl AgentCli {
 
     async fn run_devin(&self, request: RunRequest) -> Result<RunResult, Error> {
         request.require_default_tools("Devin")?;
+        if request.resume.is_some() {
+            return Err(Error::InvalidRequest("Devin cannot resume sessions".into()));
+        }
         let prompt_file = tempfile::NamedTempFile::new()?;
         std::fs::write(prompt_file.path(), request.prompt_with_system())?;
         let mut command = Command::new(&self.binary);
@@ -360,7 +433,7 @@ impl AgentCli {
             command.arg("--model").arg(model);
         }
         configure(&mut command, &request, false);
-        let (output, duration) = capture(command, None, request.timeout).await?;
+        let (output, duration) = capture(command, None, request.timeout, None).await?;
         let stderr_tail = stderr_tail(&output.stderr);
         check_status(&output, &stderr_tail)?;
         result(
@@ -370,6 +443,60 @@ impl AgentCli {
             duration,
             stderr_tail,
         )
+    }
+}
+
+/// Claude `stream-json` line → event.
+fn claude_event(handler: &EventHandler, line: &str) {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    match event["type"].as_str() {
+        Some("stream_event") => {
+            let delta = &event["event"]["delta"];
+            if delta["type"] == "text_delta"
+                && let Some(text) = delta["text"].as_str()
+            {
+                handler.emit(AgentEvent::TextDelta(text.to_string()));
+            }
+        }
+        Some("assistant") => {
+            for block in event["message"]["content"].as_array().into_iter().flatten() {
+                if block["type"] == "tool_use"
+                    && let Some(name) = block["name"].as_str()
+                {
+                    handler.emit(AgentEvent::ToolUse {
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Codex JSONL line → event.
+fn codex_event(handler: &EventHandler, line: &str) {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    let item = &event["item"];
+    match (event["type"].as_str(), item["type"].as_str()) {
+        (Some("item.started"), Some(kind)) if kind != "agent_message" && kind != "reasoning" => {
+            let name = item["tool"]
+                .as_str()
+                .or_else(|| item["name"].as_str())
+                .unwrap_or(kind);
+            handler.emit(AgentEvent::ToolUse {
+                name: name.to_string(),
+            });
+        }
+        (Some("item.completed"), Some("agent_message")) => {
+            if let Some(text) = item["text"].as_str() {
+                handler.emit(AgentEvent::Text(text.to_string()));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -564,15 +691,19 @@ fn configure(command: &mut Command, request: &RunRequest, stdin: bool) {
     command.envs(request.env.iter().map(|(k, v)| (k, v)));
 }
 
+/// Called with each stdout line as it arrives (without the newline).
+type LineHandler<'a> = Option<&'a (dyn Fn(&str) + Send + Sync)>;
+
 async fn capture(
     mut command: Command,
     prompt: Option<&str>,
     timeout: Duration,
+    on_line: LineHandler<'_>,
 ) -> Result<(Output, Duration), Error> {
     let started = Instant::now();
     let mut child = command.spawn()?;
     let mut stdin = child.stdin.take();
-    let mut stdout = child.stdout.take().expect("piped stdout");
+    let stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let work = async {
         let write = async {
@@ -584,7 +715,16 @@ async fn capture(
         };
         let read_out = async {
             let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).await?;
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let start = bytes.len();
+                if reader.read_until(b'\n', &mut bytes).await? == 0 {
+                    break;
+                }
+                if let Some(on_line) = on_line {
+                    on_line(String::from_utf8_lossy(&bytes[start..]).trim_end());
+                }
+            }
             Ok::<_, std::io::Error>(bytes)
         };
         let read_err = async {

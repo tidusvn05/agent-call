@@ -4,7 +4,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use agent_core::{AgentCli, Error, McpServer, Provider, RunRequest, ToolPolicy};
+use agent_core::{
+    AgentCli, AgentEvent, Error, EventHandler, McpServer, Provider, RunRequest, ToolPolicy,
+};
+use std::sync::{Arc, Mutex};
 
 fn fake_cli(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
@@ -425,7 +428,7 @@ async fn codex_restricted_policies() {
         assert!(config.contains(&"mcp_servers.kb.url=\"http://127.0.0.1:9/kb/mcp\""));
         assert!(config.contains(&"mcp_servers.kb.bearer_token_env_var=\"KB_TOKEN\""));
         assert!(config.contains(&"developer_instructions=\"Be brief.\""));
-        assert_eq!(after(&a, "-s"), ["read-only"]);
+        assert!(config.contains(&"sandbox_mode=\"read-only\""), "{config:?}");
         let empty_reset = config.iter().position(|c| *c == "mcp_servers={}").unwrap();
         let kb = config
             .iter()
@@ -517,4 +520,197 @@ async fn invalid_mcp_servers_are_rejected() {
         ..request(dir.path())
     };
     assert!(matches!(cli.run(dup).await, Err(Error::InvalidRequest(_))));
+}
+
+#[tokio::test]
+async fn sessions_persist_and_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    claude.run(request(dir.path())).await.unwrap();
+    assert!(
+        args(dir.path())
+            .iter()
+            .any(|a| a == "--no-session-persistence"),
+        "ephemeral by default"
+    );
+    claude
+        .run(RunRequest {
+            persist_session: true,
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert!(
+        !args(dir.path())
+            .iter()
+            .any(|a| a == "--no-session-persistence")
+    );
+    claude
+        .run(RunRequest {
+            resume: Some("s-1".into()),
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert_eq!(after(&args(dir.path()), "--resume"), ["s-1"]);
+
+    let codex = AgentCli::with_binary(
+        Provider::Codex,
+        recording_cli(dir.path(), "codex", CODEX_OK),
+    )
+    .unwrap();
+    codex
+        .run(RunRequest {
+            resume: Some("t-1".into()),
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    let a = args(dir.path());
+    assert_eq!(&a[..2], ["exec", "resume"]);
+    assert_eq!(&a[a.len() - 2..], ["t-1", "-"]);
+    assert!(
+        !a.iter()
+            .any(|x| x == "-s" || x == "--color" || x == "--ephemeral"),
+        "{a:?}"
+    );
+    codex
+        .run(RunRequest {
+            persist_session: true,
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert!(!args(dir.path()).iter().any(|x| x == "--ephemeral"));
+
+    let devin =
+        AgentCli::with_binary(Provider::Devin, recording_cli(dir.path(), "devin", "ok")).unwrap();
+    let r = devin
+        .run(RunRequest {
+            resume: Some("x".into()),
+            ..request(dir.path())
+        })
+        .await;
+    assert!(matches!(r, Err(Error::InvalidRequest(_))));
+}
+
+#[tokio::test]
+async fn missing_sessions_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = AgentCli::with_binary(
+        Provider::Claude,
+        fake_cli(
+            dir.path(),
+            "claude",
+            "cat >/dev/null; echo 'No conversation found with session ID: s-9' >&2; exit 1",
+        ),
+    )
+    .unwrap();
+    let r = claude
+        .run(RunRequest {
+            resume: Some("s-9".into()),
+            ..request(dir.path())
+        })
+        .await;
+    assert!(
+        matches!(r, Err(Error::SessionNotFound(ref id)) if id == "s-9"),
+        "{r:?}"
+    );
+
+    let codex = AgentCli::with_binary(
+        Provider::Codex,
+        fake_cli(dir.path(), "codex", "cat >/dev/null; echo 'Error: thread/resume failed: no rollout found for thread id t-9' >&2; exit 1"),
+    )
+    .unwrap();
+    let r = codex
+        .run(RunRequest {
+            resume: Some("t-9".into()),
+            ..request(dir.path())
+        })
+        .await;
+    assert!(matches!(r, Err(Error::SessionNotFound(_))), "{r:?}");
+}
+
+fn collect() -> (EventHandler, Arc<Mutex<Vec<AgentEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    (
+        EventHandler::new(move |e| sink.lock().unwrap().push(e)),
+        events,
+    )
+}
+
+#[tokio::test]
+async fn claude_streams_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"{"type":"system","subtype":"init"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__kb__kb_grep","input":{}}]}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}}"#,
+        r#"{"type":"result","is_error":false,"result":"Hello","session_id":"s-2","usage":{"input_tokens":1,"output_tokens":2}}"#,
+    ];
+    let body = format!(
+        "cat >/dev/null\n{}",
+        lines
+            .iter()
+            .map(|l| format!("printf '%s\\n' '{l}'"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let cli =
+        AgentCli::with_binary(Provider::Claude, fake_cli(dir.path(), "claude", &body)).unwrap();
+    let (handler, events) = collect();
+    let result = cli
+        .run(RunRequest {
+            on_event: Some(handler),
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.text, "Hello");
+    assert_eq!(result.session_id.as_deref(), Some("s-2"));
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            AgentEvent::ToolUse {
+                name: "mcp__kb__kb_grep".into()
+            },
+            AgentEvent::TextDelta("Hel".into()),
+            AgentEvent::TextDelta("lo".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn codex_reports_tools_and_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = r#"cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"t-3"}' '{"type":"item.started","item":{"type":"web_search"}}' '{"type":"item.started","item":{"type":"mcp_tool_call","tool":"kb_get"}}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed","usage":{}}'"#;
+    let cli = AgentCli::with_binary(Provider::Codex, fake_cli(dir.path(), "codex", body)).unwrap();
+    let (handler, events) = collect();
+    let result = cli
+        .run(RunRequest {
+            on_event: Some(handler),
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.text, "done");
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            AgentEvent::ToolUse {
+                name: "web_search".into()
+            },
+            AgentEvent::ToolUse {
+                name: "kb_get".into()
+            },
+            AgentEvent::Text("done".into()),
+        ]
+    );
 }

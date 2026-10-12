@@ -51,6 +51,42 @@ pub struct McpServer {
     pub bearer_token_env: Option<String>,
 }
 
+/// Progress reported while a run is going (see [`RunRequest::on_event`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentEvent {
+    /// A piece of the answer as it is generated (Claude).
+    TextDelta(String),
+    /// A complete text block or message (Codex, OpenCode; Claude between tool calls).
+    Text(String),
+    /// The agent started using a tool (`WebSearch`, `mcp__kb__kb_grep`, `web_search`…).
+    ToolUse {
+        /// Tool name as the CLI reports it.
+        name: String,
+    },
+}
+
+/// Receives [`AgentEvent`]s; called from the task reading the CLI's output, so keep it quick.
+#[derive(Clone)]
+pub struct EventHandler(pub std::sync::Arc<dyn Fn(AgentEvent) + Send + Sync>);
+
+impl EventHandler {
+    /// Wraps a callback.
+    pub fn new(f: impl Fn(AgentEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    pub(crate) fn emit(&self, event: AgentEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for EventHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EventHandler")
+    }
+}
+
 /// A single, fresh CLI run.
 ///
 /// Build it with struct update syntax so new optional fields do not break callers:
@@ -77,6 +113,14 @@ pub struct RunRequest {
     /// Instructions appended to the CLI's own system prompt (Claude: `--append-system-prompt`,
     /// Codex: `developer_instructions`). Devin and OpenCode receive it before the prompt.
     pub system_prompt: Option<String>,
+    /// Keep the CLI's session so a later run can resume it (default: ephemeral, as before 0.4).
+    pub persist_session: bool,
+    /// Continue the session returned earlier in [`RunResult::session_id`]. Implies persistence.
+    /// Claude and Codex resume in the same `cwd`; OpenCode by id; Devin rejects it.
+    pub resume: Option<String>,
+    /// Called with progress while the run goes on (Claude streams text; Codex and OpenCode report
+    /// whole messages and tool calls; Devin reports nothing).
+    pub on_event: Option<EventHandler>,
 }
 
 impl Default for RunRequest {
@@ -93,6 +137,9 @@ impl Default for RunRequest {
             mcp_servers: Vec::new(),
             env: Vec::new(),
             system_prompt: None,
+            persist_session: false,
+            resume: None,
+            on_event: None,
         }
     }
 }
@@ -174,6 +221,9 @@ pub enum Error {
     Protocol(String),
     #[error("agent returned no assistant text")]
     EmptyResponse,
+    /// The session to resume does not exist (expired, other machine, other `cwd`).
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
 }
 
 /// A verified OpenCode v2 executable.
@@ -225,6 +275,9 @@ impl OpenCodeV2 {
         let started = Instant::now();
         let mut command = Command::new(&self.binary);
         command.args(["run", "--standalone", "--format", "json"]);
+        if let Some(session) = request.resume.as_deref() {
+            command.arg("--session").arg(session);
+        }
         if let Some(model) = request.model.as_deref() {
             if model.trim().is_empty() || !model.contains('/') {
                 return Err(Error::InvalidRequest(format!(
@@ -259,7 +312,7 @@ impl OpenCodeV2 {
             };
             let (input, parsed, stderr_tail, status) = tokio::join!(
                 input,
-                parse_stdout(stdout),
+                parse_stdout(stdout, request.on_event.clone()),
                 read_stderr_tail(stderr),
                 child.wait()
             );
@@ -320,7 +373,10 @@ impl Parsed {
     }
 }
 
-async fn parse_stdout(stdout: impl AsyncRead + Unpin) -> Result<Parsed, Error> {
+async fn parse_stdout(
+    stdout: impl AsyncRead + Unpin,
+    on_event: Option<EventHandler>,
+) -> Result<Parsed, Error> {
     let mut lines = BufReader::new(stdout).lines();
     let mut parsed = Parsed::default();
     while let Some(line) = lines.next_line().await? {
@@ -338,7 +394,17 @@ async fn parse_stdout(stdout: impl AsyncRead + Unpin) -> Result<Parsed, Error> {
                 if let Some(text) = part["text"].as_str()
                     && !text.trim().is_empty()
                 {
+                    if let Some(h) = &on_event {
+                        h.emit(AgentEvent::Text(text.to_string()));
+                    }
                     parsed.text_parts.push(text.to_string());
+                }
+            }
+            Some("tool_use") => {
+                if let (Some(h), Some(name)) = (&on_event, part["tool"].as_str()) {
+                    h.emit(AgentEvent::ToolUse {
+                        name: name.to_string(),
+                    });
                 }
             }
             Some("step_start") => parsed.starts += 1,
