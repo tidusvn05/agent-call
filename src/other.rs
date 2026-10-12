@@ -206,10 +206,11 @@ impl AgentCli {
         )
         .await?;
         let stderr_tail = stderr_tail(&output.stderr);
-        if stderr_tail.contains("No conversation found") {
-            return Err(Error::SessionNotFound(
-                request.resume.clone().unwrap_or_default(),
-            ));
+        if let Some(session) = &request.resume
+            && !output.status.success()
+            && stderr_tail.contains("No conversation found")
+        {
+            return Err(Error::SessionNotFound(session.clone()));
         }
         let parsed = if streaming {
             // The last `result` line carries the same envelope as `--output-format json`.
@@ -355,12 +356,12 @@ impl AgentCli {
         )
         .await?;
         let stderr_tail = stderr_tail(&output.stderr);
-        if stderr_tail.contains("no rollout found")
-            || String::from_utf8_lossy(&output.stdout).contains("no rollout found")
+        // Only stderr: stdout carries the agent's own text, which may quote anything.
+        if let Some(session) = &request.resume
+            && !output.status.success()
+            && stderr_tail.contains("no rollout found")
         {
-            return Err(Error::SessionNotFound(
-                request.resume.clone().unwrap_or_default(),
-            ));
+            return Err(Error::SessionNotFound(session.clone()));
         }
         check_status(&output, &stderr_tail)?;
         let mut text = None;
@@ -508,6 +509,14 @@ pub(crate) fn validate_request(request: &RunRequest) -> Result<(), Error> {
         return Err(Error::InvalidRequest(format!(
             "working directory does not exist: {}",
             request.cwd.display()
+        )));
+    }
+    if let Some(session) = &request.resume
+        && (!is_identifier(session) || session.starts_with('-'))
+    {
+        // Session ids end up as command-line arguments (a positional one for Codex).
+        return Err(Error::InvalidRequest(format!(
+            "session id must use ASCII letters, digits, `_` or `-`: {session:?}"
         )));
     }
     let mut names = std::collections::HashSet::new();
