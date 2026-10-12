@@ -126,6 +126,23 @@ The opt-in tests `claude_restricted_runs_cannot_read_files` and `codex_restricte
 check with the real CLIs that a restricted run cannot read a file in its working directory, with a
 tool or through an `@path` mention.
 
+## Sessions and progress events
+
+Runs are ephemeral unless asked otherwise. Set `persist_session: true` to keep the CLI's session,
+then pass `RunResult::session_id` as `resume` in a later request with the same `cwd`:
+
+| | Persist | Resume | Unknown session |
+|---|---|---|---|
+| Claude | drops `--no-session-persistence` | `--resume <id>` | `Error::SessionNotFound` |
+| Codex | drops `--ephemeral` | `codex exec resume <id>` (sandbox via `-c sandbox_mode`) | `Error::SessionNotFound` |
+| OpenCode v2 | always | `--session <id>` | the CLI's error |
+| Devin | — | `InvalidRequest` | — |
+
+`on_event: Some(EventHandler::new(|event| …))` reports progress while the run goes on:
+`AgentEvent::TextDelta` (Claude streams the answer with `--output-format stream-json`),
+`AgentEvent::Text` (whole messages from Codex and OpenCode) and `AgentEvent::ToolUse { name }`
+(web searches, MCP tools). The final `RunResult` is the same as without events.
+
 ## Structured errors
 
 Use `discover_with_context`, `with_binary_with_context`, and

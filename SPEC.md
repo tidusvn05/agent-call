@@ -37,7 +37,12 @@ against `@path` file inlining) and Codex (shell, exec, image, browser, computer-
 plugins features disabled, read-only sandbox, `web_search` live or disabled, user MCP servers replaced);
 Devin and OpenCode reject them and per-run MCP servers with `InvalidRequest` before starting.
 
+Requests may persist and resume sessions (`persist_session`, `resume`; Claude, Codex and
+OpenCode) and report progress through `on_event` (`AgentEvent::TextDelta`, `Text`, `ToolUse`).
+Resuming an unknown Claude or Codex session fails with `SessionNotFound`.
+
 The public API is `Provider`, `AgentCli`, `RunRequest`, `RunResult`,
-`TokenUsage`, `ToolPolicy`, `McpServer`, `Error`, and `ProviderError`. `AgentCli` also has context-preserving
+`TokenUsage`, `ToolPolicy`, `McpServer`, `AgentEvent`, `EventHandler`, `Error`, and
+`ProviderError`. `AgentCli` also has context-preserving
 discovery and run methods that attach the selected provider to the original
 error. `OpenCodeV2` remains available for direct v2 calls.

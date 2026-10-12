@@ -114,3 +114,51 @@ async fn codex_restricted_runs_cannot_read_files() {
     cannot_read_files(Provider::Codex, agent_core::ToolPolicy::McpOnly).await;
     cannot_read_files(Provider::Codex, agent_core::ToolPolicy::Web).await;
 }
+
+/// A persisted session can be resumed, and progress events arrive while it runs.
+async fn resumes_with_events(provider: Provider) {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::discover_with_context(provider).unwrap();
+    let first = cli
+        .run_with_context(RunRequest {
+            prompt: "Remember the number 4127. Reply with just OK.".into(),
+            cwd: dir.path().to_path_buf(),
+            timeout: Duration::from_secs(180),
+            tool_policy: agent_core::ToolPolicy::McpOnly,
+            persist_session: true,
+            ..RunRequest::default()
+        })
+        .await
+        .unwrap();
+    let session = first.session_id.expect("a session id");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let second = cli
+        .run_with_context(RunRequest {
+            prompt: "Which number did I ask you to remember? Reply with just the number.".into(),
+            cwd: dir.path().to_path_buf(),
+            timeout: Duration::from_secs(180),
+            tool_policy: agent_core::ToolPolicy::McpOnly,
+            resume: Some(session),
+            on_event: Some(agent_core::EventHandler::new(move |e| {
+                sink.lock().unwrap().push(e)
+            })),
+            ..RunRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(second.text.contains("4127"), "{}", second.text);
+    assert!(!events.lock().unwrap().is_empty(), "no progress events");
+}
+
+#[tokio::test]
+#[ignore = "uses the authenticated Claude CLI"]
+async fn claude_resumes_with_events() {
+    resumes_with_events(Provider::Claude).await;
+}
+
+#[tokio::test]
+#[ignore = "uses the authenticated Codex CLI"]
+async fn codex_resumes_with_events() {
+    resumes_with_events(Provider::Codex).await;
+}
