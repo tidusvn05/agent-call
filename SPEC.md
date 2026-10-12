@@ -1,4 +1,4 @@
-# agent-core 0.3 specification
+# agent-core 0.4 specification
 
 `agent-core` is a Rust library for one-shot calls to four installed agent CLIs.
 It does not start or manage a persistent chat session. Authentication is owned
@@ -29,7 +29,14 @@ never retries automatically. OpenCode uses its headless permission defaults;
 the adapter does not pass `--auto`. Claude, Codex, and Devin retain the
 permission settings from their earlier agentwiki adapters.
 
+Since 0.4 a request also carries a `ToolPolicy` (`Default`, `McpOnly`, `Web`), HTTP
+`McpServer`s, extra child environment variables and an optional system prompt. `Default` keeps the
+permissions above. `McpOnly` and `Web` are enforced by Claude (`--tools`, `--allowedTools`,
+`dontAsk`, `--strict-mcp-config`) and Codex (shell, exec, image, browser, computer-use and apps
+features disabled, read-only sandbox, `web_search` live or disabled, user MCP servers replaced);
+Devin and OpenCode reject them and per-run MCP servers with `InvalidRequest` before starting.
+
 The public API is `Provider`, `AgentCli`, `RunRequest`, `RunResult`,
-`TokenUsage`, `Error`, and `ProviderError`. `AgentCli` also has context-preserving
+`TokenUsage`, `ToolPolicy`, `McpServer`, `Error`, and `ProviderError`. `AgentCli` also has context-preserving
 discovery and run methods that attach the selected provider to the original
 error. `OpenCodeV2` remains available for direct v2 calls.

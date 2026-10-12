@@ -32,6 +32,7 @@ fn request(dir: &Path) -> RunRequest {
         timeout: Duration::from_secs(2),
         env_remove: vec!["TEST_API_KEY".into()],
         json_schema: None,
+        ..RunRequest::default()
     }
 }
 
@@ -122,4 +123,15 @@ fn requires_v2() {
         OpenCodeV2::with_binary(binary),
         Err(Error::UnsupportedVersion(_))
     ));
+}
+
+#[tokio::test]
+async fn refuses_tool_policies_and_mcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = OpenCodeV2::with_binary(fake_cli(dir.path(), "echo should-not-run; exit 9")).unwrap();
+    let req = RunRequest {
+        tool_policy: agent_core::ToolPolicy::McpOnly,
+        ..request(dir.path())
+    };
+    assert!(matches!(cli.run(req).await, Err(Error::InvalidRequest(_))));
 }

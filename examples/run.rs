@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timeout: Duration::from_secs(300),
             env_remove: vec![],
             json_schema: None,
+            ..RunRequest::default()
         })
         .await?;
 
