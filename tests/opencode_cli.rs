@@ -21,6 +21,9 @@ fn fake_cli(dir: &Path, body: &str) -> std::path::PathBuf {
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
+    // Some filesystems briefly report ETXTBSY right after writing an executable while tests run
+    // in parallel (same workaround as tests/other_cli.rs).
+    std::thread::sleep(Duration::from_millis(10));
     path
 }
 
@@ -119,6 +122,7 @@ fn requires_v2() {
     let dir = tempfile::tempdir().unwrap();
     let binary = fake_cli(dir.path(), "exit 0");
     std::fs::write(&binary, "#!/bin/sh\necho 1.18.0\n").unwrap();
+    std::thread::sleep(Duration::from_millis(10));
     assert!(matches!(
         OpenCodeV2::with_binary(binary),
         Err(Error::UnsupportedVersion(_))
