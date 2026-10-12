@@ -46,6 +46,12 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Whether the CLI takes [`RunRequest::system_prompt`] as a real system prompt (Claude and
+    /// Codex). Other CLIs receive it in front of the user prompt instead.
+    pub fn native_system_prompt(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
     pub fn executable(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -108,6 +114,12 @@ impl AgentCli {
         self.provider
     }
 
+    /// Whether this CLI supports [`RunRequest::system_prompt`] natively; see
+    /// [`Provider::native_system_prompt`].
+    pub fn native_system_prompt(&self) -> bool {
+        self.provider.native_system_prompt()
+    }
+
     /// Run a request while preserving provider, exit code, and stderr in errors.
     pub async fn run_with_context(&self, request: RunRequest) -> Result<RunResult, ProviderError> {
         self.run(request).await.map_err(|source| ProviderError {
@@ -162,6 +174,12 @@ impl AgentCli {
             command.arg("--json-schema").arg(schema.to_string());
         }
         configure(&mut command, &request, true);
+        if request.tool_policy != ToolPolicy::Default {
+            // Claude Code inlines `@path` mentions from the prompt (any readable path, also
+            // outside `cwd`) before the model runs, independent of `--tools`. Set after the
+            // caller's environment so it cannot be overridden.
+            command.env("CLAUDE_CODE_DISABLE_ATTACHMENTS", "1");
+        }
         let (output, duration) = capture(command, Some(&request.prompt), request.timeout).await?;
         let stderr_tail = stderr_tail(&output.stderr);
         let envelope: Value = match serde_json::from_slice(&output.stdout) {
@@ -440,6 +458,8 @@ fn claude_tools(command: &mut Command, request: &RunRequest) {
     if restricted {
         // Never load the user's own MCP servers into a restricted run.
         command.arg("--strict-mcp-config");
+        // Untrusted prompts must not invoke skills or custom commands with `/name`.
+        command.arg("--disable-slash-commands");
         let builtin = match request.tool_policy {
             ToolPolicy::Web => CLAUDE_WEB_TOOLS,
             _ => "",
@@ -463,7 +483,7 @@ fn claude_tools(command: &mut Command, request: &RunRequest) {
 
 /// Codex features that run code, read files or reach beyond MCP and web search. Turned off for
 /// every restricted policy; the read-only sandbox stays on as a second layer.
-const CODEX_RESTRICTED_FEATURES: [&str; 7] = [
+const CODEX_RESTRICTED_FEATURES: [&str; 8] = [
     "shell_tool",
     "unified_exec",
     "view_image",
@@ -471,6 +491,8 @@ const CODEX_RESTRICTED_FEATURES: [&str; 7] = [
     "computer_use",
     "in_app_browser",
     "apps",
+    // Plugins can bring their own MCP servers and skills from the user's configuration.
+    "plugins",
 ];
 
 /// Applies the tool policy and MCP servers to a Codex command line.
@@ -505,9 +527,12 @@ fn codex_tools(command: &mut Command, request: &RunRequest) {
     }
 }
 
-/// A TOML basic string. JSON string escaping is a subset of TOML's.
+/// A TOML basic string. JSON string escaping is a subset of TOML's, except that TOML also
+/// forbids a raw DEL character.
 fn toml_string(value: &str) -> String {
-    Value::String(value.to_owned()).to_string()
+    Value::String(value.to_owned())
+        .to_string()
+        .replace('\u{7f}', "\\u007F")
 }
 
 fn split_effort<'a>(model: &'a str, valid: &[&str]) -> Result<(&'a str, Option<&'a str>), Error> {
@@ -712,4 +737,17 @@ fn nullable(value: &Value) -> bool {
         || value["anyOf"]
             .as_array()
             .is_some_and(|a| a.iter().any(|v| v["type"] == "null"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_string;
+
+    #[test]
+    fn toml_string_escapes_control_characters() {
+        assert_eq!(
+            toml_string("a\"b\\c\nd\u{1}e\u{7f}"),
+            r#""a\"b\\c\nd\u0001e\u007F""#
+        );
+    }
 }
