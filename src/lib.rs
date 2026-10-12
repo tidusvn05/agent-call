@@ -57,7 +57,7 @@ pub struct McpServer {
 pub enum AgentEvent {
     /// A piece of the answer as it is generated (Claude).
     TextDelta(String),
-    /// A complete text block or message (Codex, OpenCode; Claude between tool calls).
+    /// A complete text block or message (Codex, OpenCode).
     Text(String),
     /// The agent started using a tool (`WebSearch`, `mcp__kb__kb_grep`, `web_search`…).
     ToolUse {

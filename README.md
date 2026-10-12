@@ -135,7 +135,7 @@ then pass `RunResult::session_id` as `resume` in a later request with the same `
 |---|---|---|---|
 | Claude | drops `--no-session-persistence` | `--resume <id>` | `Error::SessionNotFound` |
 | Codex | drops `--ephemeral` | `codex exec resume <id>` (sandbox via `-c sandbox_mode`) | `Error::SessionNotFound` |
-| OpenCode v2 | always | `--session <id>` | the CLI's error |
+| OpenCode v2 | always | `--session <id>` | the CLI starts a new session with that id |
 | Devin | — | `InvalidRequest` | — |
 
 `on_event: Some(EventHandler::new(|event| …))` reports progress while the run goes on:

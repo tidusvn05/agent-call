@@ -635,6 +635,51 @@ async fn missing_sessions_are_reported() {
     assert!(matches!(r, Err(Error::SessionNotFound(_))), "{r:?}");
 }
 
+#[tokio::test]
+async fn answers_quoting_session_errors_are_not_missing_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = AgentCli::with_binary(
+        Provider::Codex,
+        recording_cli(
+            dir.path(),
+            "codex",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"no rollout found"}}"#,
+        ),
+    )
+    .unwrap();
+    let r = codex
+        .run(RunRequest {
+            resume: Some("t-9".into()),
+            ..request(dir.path())
+        })
+        .await;
+    assert!(r.is_ok(), "{r:?}");
+}
+
+#[tokio::test]
+async fn session_ids_cannot_inject_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = AgentCli::with_binary(
+        Provider::Codex,
+        fake_cli(dir.path(), "codex", "echo should-not-run; exit 9"),
+    )
+    .unwrap();
+    for id in [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "",
+        "a b",
+        "../x",
+    ] {
+        let r = codex
+            .run(RunRequest {
+                resume: Some(id.into()),
+                ..request(dir.path())
+            })
+            .await;
+        assert!(matches!(r, Err(Error::InvalidRequest(_))), "{id:?}: {r:?}");
+    }
+}
+
 fn collect() -> (EventHandler, Arc<Mutex<Vec<AgentEvent>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
