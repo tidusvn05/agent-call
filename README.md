@@ -110,17 +110,21 @@ let request = RunRequest {
 ```
 
 - **Claude** runs restricted policies with `--tools ""` (or `WebSearch,WebFetch`),
-  `--allowedTools mcp__<name>…`, `--permission-mode dontAsk` and `--strict-mcp-config`; MCP servers
-  are passed with `--mcp-config` and the token header reads `${VAR}` from the child environment.
-- **Codex** runs restricted policies with its shell, exec, image, browser, computer-use and apps
-  features disabled, the read-only sandbox, `web_search` set to `live` or `disabled`, and the user's
+  `--allowedTools mcp__<name>…`, `--permission-mode dontAsk`, `--strict-mcp-config` and
+  `--disable-slash-commands`, and with `CLAUDE_CODE_DISABLE_ATTACHMENTS=1` so `@path` mentions in
+  the prompt are not inlined as file contents; MCP servers are passed with `--mcp-config` and the
+  token header reads `${VAR}` from the child environment.
+- **Codex** runs restricted policies with its shell, exec, image, browser, computer-use, apps and
+  plugins features disabled, the read-only sandbox, `web_search` set to `live` or `disabled`, and the user's
   own `mcp_servers` replaced by the request's (`bearer_token_env_var`).
 - **System prompts** are appended to the CLI's own (Claude `--append-system-prompt`, Codex
   `developer_instructions`); Devin and OpenCode receive them before the prompt.
+  `AgentCli::native_system_prompt()` tells which case applies.
 - A CLI that cannot enforce a policy or MCP servers returns `Error::InvalidRequest` and starts nothing.
 
 The opt-in tests `claude_restricted_runs_cannot_read_files` and `codex_restricted_runs_cannot_read_files`
-check with the real CLIs that a restricted run cannot read a file in its working directory.
+check with the real CLIs that a restricted run cannot read a file in its working directory, with a
+tool or through an `@path` mention.
 
 ## Structured errors
 

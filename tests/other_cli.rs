@@ -226,6 +226,7 @@ fn recording_cli(dir: &Path, name: &str, reply: &str) -> std::path::PathBuf {
         &format!(
             r#"for a in "$@"; do printf '%s\n' "$a"; done > "{args}"
 printf '%s' "${{KB_TOKEN:-unset}}" > "{env}"
+printf '%s' "${{CLAUDE_CODE_DISABLE_ATTACHMENTS:-unset}}" > "{attachments}"
 cat > "{stdin}"
 out=''
 prev=''
@@ -234,6 +235,7 @@ for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
 printf '%s\n' '{reply}'"#,
             args = dir.join("args").display(),
             env = dir.join("env").display(),
+            attachments = dir.join("attachments").display(),
             stdin = dir.join("stdin").display(),
         ),
     )
@@ -286,9 +288,13 @@ async fn claude_default_policy_keeps_previous_flags() {
     cli.run(request(dir.path())).await.unwrap();
     let a = args(dir.path());
     assert_eq!(after(&a, "--permission-mode"), ["bypassPermissions"]);
-    assert!(
-        !a.iter()
-            .any(|x| x == "--tools" || x == "--mcp-config" || x == "--append-system-prompt")
+    assert!(!a.iter().any(|x| x == "--tools"
+        || x == "--mcp-config"
+        || x == "--append-system-prompt"
+        || x == "--disable-slash-commands"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attachments")).unwrap(),
+        "unset"
     );
 }
 
@@ -312,6 +318,7 @@ async fn claude_mcp_only() {
     assert_eq!(after(&a, "--tools"), [""]);
     assert_eq!(after(&a, "--allowedTools"), ["mcp__kb"]);
     assert!(a.iter().any(|x| x == "--strict-mcp-config"));
+    assert!(a.iter().any(|x| x == "--disable-slash-commands"));
     let config: serde_json::Value = serde_json::from_str(after(&a, "--mcp-config")[0]).unwrap();
     assert_eq!(
         config["mcpServers"]["kb"]["url"],
@@ -330,6 +337,39 @@ async fn claude_mcp_only() {
         std::fs::read_to_string(dir.path().join("env")).unwrap(),
         "secret-token"
     );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attachments")).unwrap(),
+        "1",
+        "`@path` mentions must not be inlined"
+    );
+}
+
+#[tokio::test]
+async fn claude_restricted_attachment_guard_wins_over_caller_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    let mut req = restricted(dir.path(), ToolPolicy::Web);
+    req.env
+        .push(("CLAUDE_CODE_DISABLE_ATTACHMENTS".into(), "0".into()));
+    req.env_remove
+        .push("CLAUDE_CODE_DISABLE_ATTACHMENTS".into());
+    cli.run(req).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attachments")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
+fn native_system_prompt_support() {
+    assert!(Provider::Claude.native_system_prompt());
+    assert!(Provider::Codex.native_system_prompt());
+    assert!(!Provider::Devin.native_system_prompt());
+    assert!(!Provider::OpenCodeV2.native_system_prompt());
 }
 
 #[tokio::test]
@@ -369,6 +409,7 @@ async fn codex_restricted_policies() {
             "computer_use",
             "in_app_browser",
             "apps",
+            "plugins",
         ] {
             assert!(
                 disabled.contains(&feature),

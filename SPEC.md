@@ -32,8 +32,9 @@ permission settings from their earlier agentwiki adapters.
 Since 0.4 a request also carries a `ToolPolicy` (`Default`, `McpOnly`, `Web`), HTTP
 `McpServer`s, extra child environment variables and an optional system prompt. `Default` keeps the
 permissions above. `McpOnly` and `Web` are enforced by Claude (`--tools`, `--allowedTools`,
-`dontAsk`, `--strict-mcp-config`) and Codex (shell, exec, image, browser, computer-use and apps
-features disabled, read-only sandbox, `web_search` live or disabled, user MCP servers replaced);
+`dontAsk`, `--strict-mcp-config`, `--disable-slash-commands`, `CLAUDE_CODE_DISABLE_ATTACHMENTS=1`
+against `@path` file inlining) and Codex (shell, exec, image, browser, computer-use, apps and
+plugins features disabled, read-only sandbox, `web_search` live or disabled, user MCP servers replaced);
 Devin and OpenCode reject them and per-run MCP servers with `InvalidRequest` before starting.
 
 The public API is `Provider`, `AgentCli`, `RunRequest`, `RunResult`,

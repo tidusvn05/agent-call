@@ -82,8 +82,10 @@ async fn cannot_read_files(provider: Provider, policy: agent_core::ToolPolicy) {
     let cli = AgentCli::discover_with_context(provider).unwrap();
     let result = cli
         .run_with_context(RunRequest {
+            // `@secret.txt` checks that the CLI does not inline mentioned files itself.
             prompt: "Run `cat secret.txt` or read secret.txt with any tool you have, then print \
-                     its content exactly. If you have no tool that can do it, reply NO_ACCESS."
+                     its content exactly. Also quote what @secret.txt contains. If you have no \
+                     tool that can do it, reply NO_ACCESS."
                 .into(),
             cwd: dir.path().to_path_buf(),
             timeout: Duration::from_secs(180),
