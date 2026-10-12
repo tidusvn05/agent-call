@@ -16,7 +16,7 @@ application needs to remove environment variables before spawning the CLI.
 
 ```toml
 [dependencies]
-agent-core = { git = "https://github.com/tidusvn05/agent-core", tag = "v0.3.1" }
+agent-core = { git = "https://github.com/tidusvn05/agent-core", tag = "v0.4.0" }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -34,8 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cwd: std::env::current_dir()?,
         model: None, // use the CLI's configured default
         timeout: Duration::from_secs(300),
-        env_remove: vec![],
-        json_schema: None,
+        ..RunRequest::default()
     }).await?;
 
     println!("{}", result.text);
@@ -78,6 +77,50 @@ cargo run --example run -- opencode openai/gpt-5#high
 ```
 
 Choose model IDs available in your authenticated CLI configuration.
+
+## Tools, MCP servers and system prompts
+
+By default each CLI keeps its historical permissions (see [Execution behavior](#execution-behavior)),
+which suits trusted batch jobs. For untrusted input, such as a chat bot forwarding user messages,
+choose a restricted `tool_policy`. No restricted policy gives the agent a shell, file access or code
+execution.
+
+| `tool_policy` | Agent may use | Claude | Codex | Devin, OpenCode |
+|---|---|---|---|---|
+| `Default` | everything the CLI allowed before 0.4 | ✅ | ✅ | ✅ |
+| `McpOnly` | tools of the request's `mcp_servers` | ✅ | ✅ | `InvalidRequest` |
+| `Web` | `McpOnly` plus built-in web search and fetch | ✅ | ✅ | `InvalidRequest` |
+
+```rust
+use agent_core::{McpServer, RunRequest, ToolPolicy};
+
+let request = RunRequest {
+    prompt: user_message,
+    cwd: empty_work_dir,
+    tool_policy: ToolPolicy::Web,
+    mcp_servers: vec![McpServer {
+        name: "kb".into(),
+        url: "http://127.0.0.1:8080/mcp".into(),
+        bearer_token_env: Some("KB_TOKEN".into()),
+    }],
+    env: vec![("KB_TOKEN".into(), run_token.into())], // never on the command line
+    system_prompt: Some("You answer questions about our products.".into()),
+    ..RunRequest::default()
+};
+```
+
+- **Claude** runs restricted policies with `--tools ""` (or `WebSearch,WebFetch`),
+  `--allowedTools mcp__<name>…`, `--permission-mode dontAsk` and `--strict-mcp-config`; MCP servers
+  are passed with `--mcp-config` and the token header reads `${VAR}` from the child environment.
+- **Codex** runs restricted policies with its shell, exec, image, browser, computer-use and apps
+  features disabled, the read-only sandbox, `web_search` set to `live` or `disabled`, and the user's
+  own `mcp_servers` replaced by the request's (`bearer_token_env_var`).
+- **System prompts** are appended to the CLI's own (Claude `--append-system-prompt`, Codex
+  `developer_instructions`); Devin and OpenCode receive them before the prompt.
+- A CLI that cannot enforce a policy or MCP servers returns `Error::InvalidRequest` and starts nothing.
+
+The opt-in tests `claude_restricted_runs_cannot_read_files` and `codex_restricted_runs_cannot_read_files`
+check with the real CLIs that a restricted run cannot read a file in its working directory.
 
 ## Structured errors
 

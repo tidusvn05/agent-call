@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::{Error, OpenCodeV2, RunRequest, RunResult, TokenUsage};
+use crate::{Error, McpServer, OpenCodeV2, RunRequest, RunResult, TokenUsage, ToolPolicy};
 
 /// An adapter error with the selected provider preserved for callers.
 #[derive(Debug, thiserror::Error)]
@@ -139,11 +139,17 @@ impl AgentCli {
             "--output-format",
             "json",
             "--no-session-persistence",
-            "--permission-mode",
-            "bypassPermissions",
             "--setting-sources",
             "local",
         ]);
+        claude_tools(&mut command, &request);
+        if let Some(system) = request
+            .system_prompt
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            command.arg("--append-system-prompt").arg(system);
+        }
         if let Some(model) = request.model.as_deref() {
             let (name, effort) = split_effort(model, &["low", "medium", "high", "xhigh", "max"])?;
             command.arg("--model").arg(name);
@@ -254,6 +260,16 @@ impl AgentCli {
         if let Some(file) = &schema_file {
             command.arg("--output-schema").arg(file.path());
         }
+        codex_tools(&mut command, &request);
+        if let Some(system) = request
+            .system_prompt
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            command
+                .arg("-c")
+                .arg(format!("developer_instructions={}", toml_string(system)));
+        }
         command.arg("-");
         configure(&mut command, &request, true);
         let (output, duration) = capture(command, Some(&request.prompt), request.timeout).await?;
@@ -308,8 +324,9 @@ impl AgentCli {
     }
 
     async fn run_devin(&self, request: RunRequest) -> Result<RunResult, Error> {
+        request.require_default_tools("Devin")?;
         let prompt_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(prompt_file.path(), &request.prompt)?;
+        std::fs::write(prompt_file.path(), request.prompt_with_system())?;
         let mut command = Command::new(&self.binary);
         command
             .arg("-p")
@@ -338,7 +355,7 @@ impl AgentCli {
     }
 }
 
-fn validate_request(request: &RunRequest) -> Result<(), Error> {
+pub(crate) fn validate_request(request: &RunRequest) -> Result<(), Error> {
     if request.prompt.trim().is_empty() {
         return Err(Error::InvalidRequest("prompt is empty".into()));
     }
@@ -348,7 +365,149 @@ fn validate_request(request: &RunRequest) -> Result<(), Error> {
             request.cwd.display()
         )));
     }
+    let mut names = std::collections::HashSet::new();
+    for server in &request.mcp_servers {
+        validate_mcp_server(server)?;
+        if !names.insert(server.name.as_str()) {
+            return Err(Error::InvalidRequest(format!(
+                "duplicate MCP server name: {}",
+                server.name
+            )));
+        }
+    }
     Ok(())
+}
+
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn validate_mcp_server(server: &McpServer) -> Result<(), Error> {
+    if !is_identifier(&server.name) {
+        return Err(Error::InvalidRequest(format!(
+            "MCP server name must use ASCII letters, digits, `_` or `-`: {:?}",
+            server.name
+        )));
+    }
+    if !(server.url.starts_with("http://") || server.url.starts_with("https://"))
+        || server.url.chars().any(|c| c.is_whitespace() || c == '"')
+    {
+        return Err(Error::InvalidRequest(format!(
+            "MCP server URL must be http(s) without spaces or quotes: {}",
+            server.url
+        )));
+    }
+    if let Some(var) = &server.bearer_token_env
+        && !(is_identifier(var) && !var.contains('-'))
+    {
+        return Err(Error::InvalidRequest(format!(
+            "bearer token variable must be a plain environment variable name: {var:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Claude Code built-in tools for each restricted policy. `--tools` is a whitelist, so tools
+/// added in later Claude Code versions stay off.
+const CLAUDE_WEB_TOOLS: &str = "WebSearch,WebFetch";
+
+/// Applies the tool policy and MCP servers to a Claude Code command line.
+fn claude_tools(command: &mut Command, request: &RunRequest) {
+    let restricted = request.tool_policy != ToolPolicy::Default;
+    if !restricted {
+        command.args(["--permission-mode", "bypassPermissions"]);
+    }
+    if !request.mcp_servers.is_empty() {
+        let servers: serde_json::Map<String, Value> = request
+            .mcp_servers
+            .iter()
+            .map(|s| {
+                let mut server = serde_json::json!({"type": "http", "url": s.url});
+                if let Some(var) = &s.bearer_token_env {
+                    // Claude Code expands `${VAR}` from the child environment.
+                    server["headers"] =
+                        serde_json::json!({"Authorization": format!("Bearer ${{{var}}}")});
+                }
+                (s.name.clone(), server)
+            })
+            .collect();
+        command
+            .arg("--mcp-config")
+            .arg(serde_json::json!({"mcpServers": servers}).to_string());
+    }
+    if restricted {
+        // Never load the user's own MCP servers into a restricted run.
+        command.arg("--strict-mcp-config");
+        let builtin = match request.tool_policy {
+            ToolPolicy::Web => CLAUDE_WEB_TOOLS,
+            _ => "",
+        };
+        command.arg("--tools").arg(builtin);
+        let mut allowed: Vec<String> = request
+            .mcp_servers
+            .iter()
+            .map(|s| format!("mcp__{}", s.name))
+            .collect();
+        if request.tool_policy == ToolPolicy::Web {
+            allowed.extend(CLAUDE_WEB_TOOLS.split(',').map(str::to_string));
+        }
+        if !allowed.is_empty() {
+            command.arg("--allowedTools").arg(allowed.join(","));
+        }
+        // Anything not allowed above is denied instead of prompting.
+        command.args(["--permission-mode", "dontAsk"]);
+    }
+}
+
+/// Codex features that run code, read files or reach beyond MCP and web search. Turned off for
+/// every restricted policy; the read-only sandbox stays on as a second layer.
+const CODEX_RESTRICTED_FEATURES: [&str; 7] = [
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "browser_use",
+    "computer_use",
+    "in_app_browser",
+    "apps",
+];
+
+/// Applies the tool policy and MCP servers to a Codex command line.
+fn codex_tools(command: &mut Command, request: &RunRequest) {
+    let restricted = request.tool_policy != ToolPolicy::Default;
+    if restricted {
+        for feature in CODEX_RESTRICTED_FEATURES {
+            command.arg("--disable").arg(feature);
+        }
+        let search = if request.tool_policy == ToolPolicy::Web {
+            "live"
+        } else {
+            "disabled"
+        };
+        command.arg("-c").arg(format!("web_search=\"{search}\""));
+        // Drop the user's own MCP servers; the request's servers are added below.
+        command.arg("-c").arg("mcp_servers={}");
+    }
+    for server in &request.mcp_servers {
+        command.arg("-c").arg(format!(
+            "mcp_servers.{}.url={}",
+            server.name,
+            toml_string(&server.url)
+        ));
+        if let Some(var) = &server.bearer_token_env {
+            command.arg("-c").arg(format!(
+                "mcp_servers.{}.bearer_token_env_var={}",
+                server.name,
+                toml_string(var)
+            ));
+        }
+    }
+}
+
+/// A TOML basic string. JSON string escaping is a subset of TOML's.
+fn toml_string(value: &str) -> String {
+    Value::String(value.to_owned()).to_string()
 }
 
 fn split_effort<'a>(model: &'a str, valid: &[&str]) -> Result<(&'a str, Option<&'a str>), Error> {
@@ -377,6 +536,7 @@ fn configure(command: &mut Command, request: &RunRequest, stdin: bool) {
     for name in &request.env_remove {
         command.env_remove(name);
     }
+    command.envs(request.env.iter().map(|(k, v)| (k, v)));
 }
 
 async fn capture(

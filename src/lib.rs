@@ -17,9 +17,44 @@ use tokio::process::Command;
 mod other;
 pub use other::{AgentCli, Provider, ProviderError};
 
+pub(crate) use other::validate_request;
+
 const STDERR_LIMIT: usize = 4096;
 
+/// Which tools the agent may use during a run.
+///
+/// [`ToolPolicy::Default`] keeps each CLI's historical settings (see the README). The other
+/// policies never give the agent a shell, file access or code execution: a CLI that cannot
+/// enforce a requested policy fails with [`Error::InvalidRequest`] instead of running with more
+/// power.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ToolPolicy {
+    /// The CLI's previous behaviour (Claude: `bypassPermissions`; Codex: read-only sandbox).
+    #[default]
+    Default,
+    /// Only tools from the request's MCP servers. Supported by Claude and Codex.
+    McpOnly,
+    /// MCP tools plus the CLI's built-in web search and fetch. Supported by Claude and Codex.
+    Web,
+}
+
+/// An MCP server (streamable HTTP) the agent may use during a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    /// Server name, used in tool names (`mcp__<name>__…`); ASCII letters, digits, `_` and `-`.
+    pub name: String,
+    /// Streamable HTTP endpoint.
+    pub url: String,
+    /// Environment variable holding a bearer token. Put the token itself in [`RunRequest::env`]
+    /// so it never appears in a command line or a file.
+    pub bearer_token_env: Option<String>,
+}
+
 /// A single, fresh CLI run.
+///
+/// Build it with struct update syntax so new optional fields do not break callers:
+/// `RunRequest { prompt, cwd, ..RunRequest::default() }`.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub prompt: String,
@@ -32,6 +67,65 @@ pub struct RunRequest {
     /// Optional JSON Schema. Claude and Codex enforce it; Devin and OpenCode
     /// leave validation to the caller.
     pub json_schema: Option<Value>,
+    /// Which tools the agent may use.
+    pub tool_policy: ToolPolicy,
+    /// MCP servers for this run. Claude and Codex only; with a policy other than
+    /// [`ToolPolicy::Default`], MCP servers from the user's own CLI configuration are ignored.
+    pub mcp_servers: Vec<McpServer>,
+    /// Extra environment variables for the child only, set after `env_remove` is applied.
+    pub env: Vec<(OsString, OsString)>,
+    /// Instructions appended to the CLI's own system prompt (Claude: `--append-system-prompt`,
+    /// Codex: `developer_instructions`). Devin and OpenCode receive it before the prompt.
+    pub system_prompt: Option<String>,
+}
+
+impl Default for RunRequest {
+    /// An empty prompt in the current directory with a five-minute timeout.
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            cwd: PathBuf::from("."),
+            model: None,
+            timeout: Duration::from_secs(300),
+            env_remove: Vec::new(),
+            json_schema: None,
+            tool_policy: ToolPolicy::Default,
+            mcp_servers: Vec::new(),
+            env: Vec::new(),
+            system_prompt: None,
+        }
+    }
+}
+
+impl RunRequest {
+    /// The prompt with the system prompt in front, for CLIs without a system prompt option.
+    pub(crate) fn prompt_with_system(&self) -> String {
+        match self.system_prompt.as_deref().map(str::trim) {
+            Some(system) if !system.is_empty() => {
+                format!(
+                    "<instructions>\n{system}\n</instructions>\n\n{}",
+                    self.prompt
+                )
+            }
+            _ => self.prompt.clone(),
+        }
+    }
+
+    /// Rejects tool policies and MCP servers for CLIs that cannot enforce them.
+    pub(crate) fn require_default_tools(&self, cli: &str) -> Result<(), Error> {
+        if self.tool_policy != ToolPolicy::Default {
+            return Err(Error::InvalidRequest(format!(
+                "{cli} cannot enforce tool policy {:?}",
+                self.tool_policy
+            )));
+        }
+        if !self.mcp_servers.is_empty() {
+            return Err(Error::InvalidRequest(format!(
+                "{cli} does not support per-run MCP servers"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Token accounting reported by the CLI.
@@ -126,15 +220,8 @@ impl OpenCodeV2 {
 
     /// Run a fresh prompt. Dropping the future terminates its child process.
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, Error> {
-        if request.prompt.trim().is_empty() {
-            return Err(Error::InvalidRequest("prompt is empty".into()));
-        }
-        if !request.cwd.is_dir() {
-            return Err(Error::InvalidRequest(format!(
-                "working directory does not exist: {}",
-                request.cwd.display()
-            )));
-        }
+        validate_request(&request)?;
+        request.require_default_tools("OpenCode")?;
         let started = Instant::now();
         let mut command = Command::new(&self.binary);
         command.args(["run", "--standalone", "--format", "json"]);
@@ -149,6 +236,7 @@ impl OpenCodeV2 {
         for name in &request.env_remove {
             command.env_remove(name);
         }
+        command.envs(request.env.iter().map(|(k, v)| (k, v)));
         command
             .current_dir(&request.cwd)
             .stdin(Stdio::piped())
@@ -162,7 +250,9 @@ impl OpenCodeV2 {
         let stderr = child.stderr.take().expect("piped stderr");
         let work = async {
             let input = async {
-                stdin.write_all(request.prompt.as_bytes()).await?;
+                stdin
+                    .write_all(request.prompt_with_system().as_bytes())
+                    .await?;
                 stdin.shutdown().await?;
                 drop(stdin);
                 Ok::<(), std::io::Error>(())

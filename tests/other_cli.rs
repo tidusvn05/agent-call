@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use agent_core::{AgentCli, Error, Provider, RunRequest};
+use agent_core::{AgentCli, Error, McpServer, Provider, RunRequest, ToolPolicy};
 
 fn fake_cli(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
@@ -30,6 +30,7 @@ fn request(dir: &Path) -> RunRequest {
         timeout: Duration::from_secs(2),
         env_remove: vec![],
         json_schema: None,
+        ..RunRequest::default()
     }
 }
 
@@ -215,4 +216,264 @@ async fn other_adapters_enforce_timeout() {
         assert_eq!(error.exit_code(), None);
         assert_eq!(error.stderr_tail(), None);
     }
+}
+
+/// A fake CLI that records its arguments (one per line) and selected environment variables.
+fn recording_cli(dir: &Path, name: &str, reply: &str) -> std::path::PathBuf {
+    fake_cli(
+        dir,
+        name,
+        &format!(
+            r#"for a in "$@"; do printf '%s\n' "$a"; done > "{args}"
+printf '%s' "${{KB_TOKEN:-unset}}" > "{env}"
+cat > "{stdin}"
+out=''
+prev=''
+for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+[ -n "$out" ] && printf 'final' > "$out"
+printf '%s\n' '{reply}'"#,
+            args = dir.join("args").display(),
+            env = dir.join("env").display(),
+            stdin = dir.join("stdin").display(),
+        ),
+    )
+}
+
+fn args(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("args"))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.windows(2)
+        .filter(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
+        .collect()
+}
+
+fn kb_server() -> McpServer {
+    McpServer {
+        name: "kb".into(),
+        url: "http://127.0.0.1:9/kb/mcp".into(),
+        bearer_token_env: Some("KB_TOKEN".into()),
+    }
+}
+
+fn restricted(dir: &Path, policy: ToolPolicy) -> RunRequest {
+    RunRequest {
+        tool_policy: policy,
+        mcp_servers: vec![kb_server()],
+        env: vec![("KB_TOKEN".into(), "secret-token".into())],
+        system_prompt: Some("Be brief.".into()),
+        ..request(dir)
+    }
+}
+
+const CLAUDE_OK: &str = r#"{"is_error":false,"result":"ok"}"#;
+const CODEX_OK: &str = r#"{"type":"turn.completed","usage":{}}"#;
+
+#[tokio::test]
+async fn claude_default_policy_keeps_previous_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    cli.run(request(dir.path())).await.unwrap();
+    let a = args(dir.path());
+    assert_eq!(after(&a, "--permission-mode"), ["bypassPermissions"]);
+    assert!(
+        !a.iter()
+            .any(|x| x == "--tools" || x == "--mcp-config" || x == "--append-system-prompt")
+    );
+}
+
+#[tokio::test]
+async fn claude_mcp_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    cli.run(restricted(dir.path(), ToolPolicy::McpOnly))
+        .await
+        .unwrap();
+    let a = args(dir.path());
+    assert_eq!(
+        after(&a, "--permission-mode"),
+        ["dontAsk"],
+        "never bypassPermissions"
+    );
+    assert_eq!(after(&a, "--tools"), [""]);
+    assert_eq!(after(&a, "--allowedTools"), ["mcp__kb"]);
+    assert!(a.iter().any(|x| x == "--strict-mcp-config"));
+    let config: serde_json::Value = serde_json::from_str(after(&a, "--mcp-config")[0]).unwrap();
+    assert_eq!(
+        config["mcpServers"]["kb"]["url"],
+        "http://127.0.0.1:9/kb/mcp"
+    );
+    assert_eq!(
+        config["mcpServers"]["kb"]["headers"]["Authorization"],
+        "Bearer ${KB_TOKEN}"
+    );
+    assert_eq!(after(&a, "--append-system-prompt"), ["Be brief."]);
+    assert!(
+        !a.iter().any(|x| x.contains("secret-token")),
+        "token never on the command line"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("env")).unwrap(),
+        "secret-token"
+    );
+}
+
+#[tokio::test]
+async fn claude_web() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    cli.run(restricted(dir.path(), ToolPolicy::Web))
+        .await
+        .unwrap();
+    let a = args(dir.path());
+    assert_eq!(after(&a, "--tools"), ["WebSearch,WebFetch"]);
+    assert_eq!(after(&a, "--allowedTools"), ["mcp__kb,WebSearch,WebFetch"]);
+    assert_eq!(after(&a, "--permission-mode"), ["dontAsk"]);
+}
+
+#[tokio::test]
+async fn codex_restricted_policies() {
+    for (policy, search) in [(ToolPolicy::McpOnly, "disabled"), (ToolPolicy::Web, "live")] {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = AgentCli::with_binary(
+            Provider::Codex,
+            recording_cli(dir.path(), "codex", CODEX_OK),
+        )
+        .unwrap();
+        cli.run(restricted(dir.path(), policy)).await.unwrap();
+        let a = args(dir.path());
+        let disabled = after(&a, "--disable");
+        for feature in [
+            "shell_tool",
+            "unified_exec",
+            "view_image",
+            "browser_use",
+            "computer_use",
+            "in_app_browser",
+            "apps",
+        ] {
+            assert!(
+                disabled.contains(&feature),
+                "{policy:?} must disable {feature}: {disabled:?}"
+            );
+        }
+        let config = after(&a, "-c");
+        assert!(
+            config.contains(&format!("web_search=\"{search}\"").as_str()),
+            "{config:?}"
+        );
+        assert!(config.contains(&"mcp_servers={}"));
+        assert!(config.contains(&"mcp_servers.kb.url=\"http://127.0.0.1:9/kb/mcp\""));
+        assert!(config.contains(&"mcp_servers.kb.bearer_token_env_var=\"KB_TOKEN\""));
+        assert!(config.contains(&"developer_instructions=\"Be brief.\""));
+        assert_eq!(after(&a, "-s"), ["read-only"]);
+        let empty_reset = config.iter().position(|c| *c == "mcp_servers={}").unwrap();
+        let kb = config
+            .iter()
+            .position(|c| c.starts_with("mcp_servers.kb.url"))
+            .unwrap();
+        assert!(
+            empty_reset < kb,
+            "user servers are dropped before ours are added"
+        );
+    }
+}
+
+#[tokio::test]
+async fn devin_and_opencode_refuse_what_they_cannot_enforce() {
+    let dir = tempfile::tempdir().unwrap();
+    let devin =
+        AgentCli::with_binary(Provider::Devin, recording_cli(dir.path(), "devin", "ok")).unwrap();
+    for request in [
+        RunRequest {
+            tool_policy: ToolPolicy::Web,
+            ..request(dir.path())
+        },
+        RunRequest {
+            mcp_servers: vec![kb_server()],
+            ..request(dir.path())
+        },
+    ] {
+        assert!(matches!(
+            devin.run(request).await,
+            Err(Error::InvalidRequest(_))
+        ));
+    }
+    assert!(!dir.path().join("args").exists(), "nothing was started");
+}
+
+#[tokio::test]
+async fn devin_receives_the_system_prompt_before_the_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = format!(
+        r#"prev=''; for a in "$@"; do [ "$prev" = --prompt-file ] && cp "$a" "{}"; prev="$a"; done; echo ok"#,
+        dir.path().join("prompt").display()
+    );
+    let devin =
+        AgentCli::with_binary(Provider::Devin, fake_cli(dir.path(), "devin", &body)).unwrap();
+    devin
+        .run(RunRequest {
+            system_prompt: Some("Be brief.".into()),
+            ..request(dir.path())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompt")).unwrap(),
+        "<instructions>\nBe brief.\n</instructions>\n\nhello\nworld"
+    );
+}
+
+#[tokio::test]
+async fn invalid_mcp_servers_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = AgentCli::with_binary(
+        Provider::Claude,
+        recording_cli(dir.path(), "claude", CLAUDE_OK),
+    )
+    .unwrap();
+    let bad = [
+        McpServer {
+            name: "k b".into(),
+            ..kb_server()
+        },
+        McpServer {
+            url: "file:///etc/passwd".into(),
+            ..kb_server()
+        },
+        McpServer {
+            bearer_token_env: Some("A-B".into()),
+            ..kb_server()
+        },
+    ];
+    for server in bad {
+        let req = RunRequest {
+            mcp_servers: vec![server],
+            ..request(dir.path())
+        };
+        assert!(matches!(cli.run(req).await, Err(Error::InvalidRequest(_))));
+    }
+    let dup = RunRequest {
+        mcp_servers: vec![kb_server(), kb_server()],
+        ..request(dir.path())
+    };
+    assert!(matches!(cli.run(dup).await, Err(Error::InvalidRequest(_))));
 }
