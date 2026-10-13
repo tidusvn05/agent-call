@@ -427,6 +427,10 @@ async fn codex_restricted_policies() {
         assert!(config.contains(&"mcp_servers={}"));
         assert!(config.contains(&"mcp_servers.kb.url=\"http://127.0.0.1:9/kb/mcp\""));
         assert!(config.contains(&"mcp_servers.kb.bearer_token_env_var=\"KB_TOKEN\""));
+        assert!(
+            config.contains(&"mcp_servers.kb.default_tools_approval_mode=\"approve\""),
+            "exec cannot ask, so the request's MCP tools are pre-approved: {config:?}"
+        );
         assert!(config.contains(&"developer_instructions=\"Be brief.\""));
         assert!(config.contains(&"sandbox_mode=\"read-only\""), "{config:?}");
         let empty_reset = config.iter().position(|c| *c == "mcp_servers={}").unwrap();
