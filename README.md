@@ -1,9 +1,20 @@
 # agent-call
 
-`agent-call` is a Rust library for one-shot calls to four local agent CLIs:
-Claude, Codex, Devin, and OpenCode v2. It uses each CLI's saved authentication
-and starts a fresh process for every request. The caller supplies a prompt and
-gets final text, elapsed time, and token usage when the CLI reports it.
+[![crates.io](https://img.shields.io/crates/v/agent-call.svg)](https://crates.io/crates/agent-call)
+[![docs.rs](https://docs.rs/agent-call/badge.svg)](https://docs.rs/agent-call)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/agent-call.svg)](#license)
+
+Call Claude, Codex, Devin, and OpenCode v2 from Rust through one async API.
+`agent-call` uses your installed CLIs and their saved authentication. Each
+request starts a fresh process and returns the final answer, elapsed time,
+session ID, and token usage when the CLI reports it.
+
+- Choose a provider and model without rewriting your application integration.
+- Configure tool policies, HTTP MCP servers, and system prompts.
+- Persist and resume sessions, and receive progress events where supported.
+- Set timeouts and handle typed errors, including provider context.
+
+[API reference](https://docs.rs/agent-call) · [crates.io](https://crates.io/crates/agent-call) · [Releases](https://github.com/tidusvn05/agent-call/releases)
 
 ## Requirements
 
@@ -12,7 +23,9 @@ it on `PATH`. OpenCode must report major version 2; version 1 is rejected.
 No provider API key is required by the library itself. Use `env_remove` if your
 application needs to remove environment variables before spawning the CLI.
 
-## Add the dependency
+## Quick start
+
+Add the published crate:
 
 ```toml
 [dependencies]
@@ -20,7 +33,7 @@ agent-call = "0.4.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-## Run a prompt
+Then run a prompt:
 
 ```rust
 use agent_call::{AgentCli, Provider, RunRequest};
@@ -42,52 +55,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Change `Provider::Claude` to select another CLI. The repository also includes
-a runnable [four-provider example](examples/run.rs):
+Set `model: None` to use the selected CLI's configured default.
+
+## Providers
+
+| CLI | Rust provider | Example model | JSON Schema | Sessions | Progress events |
+|---|---|---|---|---|---|
+| Claude | `Provider::Claude` | `sonnet@high` | Native | Persist and resume | Text deltas and tools |
+| Codex | `Provider::Codex` | `gpt-5.6-sol@high` | Native | Persist and resume | Messages and tools |
+| Devin | `Provider::Devin` | `swe-2-medium` | Caller validates | Unsupported | Unsupported |
+| OpenCode v2 | `Provider::OpenCodeV2` | `openai/gpt-5#high` | Caller validates | CLI persists; resume by ID | Messages and tools |
+
+Choose model IDs available in your authenticated CLI configuration. The
+[runnable example](examples/run.rs) accepts a provider and an optional model:
 
 ```sh
 cargo run --example run -- claude
 cargo run --example run -- codex
 cargo run --example run -- devin
 cargo run --example run -- opencode
-```
-
-Run those commands from this repository after authenticating the selected CLI.
-The example accepts an optional model as a second argument.
-
-## Provider examples
-
-The following calls use the same `RunRequest` shape shown above. Set `model`
-to `None` to inherit the selected CLI's configured default.
-
-| Provider | Rust selection | Example `model` | Native command |
-|---|---|---|---|
-| Claude | `Provider::Claude` | `Some("sonnet@high".into())` | `claude -p --output-format json` |
-| Codex | `Provider::Codex` | `Some("gpt-5.6-sol@high".into())` | `codex exec --json` |
-| Devin | `Provider::Devin` | `Some("swe-2-medium".into())` | `devin -p --prompt-file <file>` |
-| OpenCode v2 | `Provider::OpenCodeV2` | `Some("openai/gpt-5#high".into())` | `opencode run --standalone --format json` |
-
-To try an explicit model for each provider:
-
-```sh
 cargo run --example run -- claude sonnet@high
-cargo run --example run -- codex gpt-5.6-sol@high
-cargo run --example run -- devin swe-2-medium
-cargo run --example run -- opencode openai/gpt-5#high
 ```
 
-Choose model IDs available in your authenticated CLI configuration.
+Run these commands from a clone of this repository.
 
 ## Tools, MCP servers and system prompts
 
-By default each CLI keeps its historical permissions (see [Execution behavior](#execution-behavior)),
-which suits trusted batch jobs. For untrusted input, such as a chat bot forwarding user messages,
-choose a restricted `tool_policy`. No restricted policy gives the agent a shell, file access or code
-execution.
+The default policy uses each CLI's permissions described under
+[Execution behavior](#execution-behavior). For untrusted prompts, choose
+`ToolPolicy::McpOnly` or `ToolPolicy::Web` to restrict built-in tools. These
+policies disable shell, file access, and code execution in the CLI. Configure
+MCP servers to expose only the tools your application intends to allow.
 
 | `tool_policy` | Agent may use | Claude | Codex | Devin, OpenCode |
 |---|---|---|---|---|
-| `Default` | everything the CLI allowed before 0.4 | ✅ | ✅ | ✅ |
+| `Default` | CLI permissions described below | ✅ | ✅ | ✅ |
 | `McpOnly` | tools of the request's `mcp_servers` | ✅ | ✅ | `InvalidRequest` |
 | `Web` | `McpOnly` plus built-in web search and fetch | ✅ | ✅ | `InvalidRequest` |
 
@@ -95,43 +97,39 @@ execution.
 use agent_call::{McpServer, RunRequest, ToolPolicy};
 
 let request = RunRequest {
-    prompt: user_message,
-    cwd: empty_work_dir,
+    prompt: "Find the setup guide in our knowledge base.".into(),
+    cwd: std::env::current_dir()?,
     tool_policy: ToolPolicy::Web,
     mcp_servers: vec![McpServer {
         name: "kb".into(),
         url: "http://127.0.0.1:8080/mcp".into(),
         bearer_token_env: Some("KB_TOKEN".into()),
     }],
-    env: vec![("KB_TOKEN".into(), run_token.into())], // never on the command line
+    env: vec![("KB_TOKEN".into(), std::env::var("KB_TOKEN")?.into())],
     system_prompt: Some("You answer questions about our products.".into()),
     ..RunRequest::default()
 };
 ```
 
-- **Claude** runs restricted policies with `--tools ""` (or `WebSearch,WebFetch`),
-  `--allowedTools mcp__<name>…`, `--permission-mode dontAsk`, `--strict-mcp-config` and
-  `--disable-slash-commands`, and with `CLAUDE_CODE_DISABLE_ATTACHMENTS=1` so `@path` mentions in
-  the prompt are not inlined as file contents; MCP servers are passed with `--mcp-config` and the
-  token header reads `${VAR}` from the child environment.
-- **Codex** runs restricted policies with its shell, exec, image, browser, computer-use, apps and
-  plugins features disabled, the read-only sandbox, `web_search` set to `live` or `disabled`, and the user's
-  own `mcp_servers` replaced by the request's (`bearer_token_env_var`).
-- **System prompts** are appended to the CLI's own (Claude `--append-system-prompt`, Codex
-  `developer_instructions`); Devin and OpenCode receive them before the prompt.
-  `AgentCli::native_system_prompt()` tells which case applies.
-- A CLI that cannot enforce a policy or MCP servers returns `Error::InvalidRequest` and starts nothing.
+Claude and Codex support per-request HTTP MCP servers. With a restricted
+policy, the request's servers replace servers from the CLI's configuration.
+Bearer tokens are passed through the child environment. A provider that cannot
+enforce a requested policy or MCP configuration returns `Error::InvalidRequest`
+before starting a process.
 
-The opt-in tests `claude_restricted_runs_cannot_read_files` and `codex_restricted_runs_cannot_read_files`
-check with the real CLIs that a restricted run cannot read a file in its working directory, with a
-tool or through an `@path` mention.
+`system_prompt` appends instructions to the CLI's own system prompt for Claude
+and Codex. Devin and OpenCode receive those instructions before the user prompt.
+Use `AgentCli::native_system_prompt()` to check support. See [SPEC.md](SPEC.md)
+for the native command and permission contracts.
 
 ## Sessions and progress events
 
-Runs are ephemeral unless asked otherwise. Set `persist_session: true` to keep the CLI's session,
-then pass `RunResult::session_id` as `resume` in a later request with the same `cwd`:
+Claude and Codex runs are ephemeral by default. Set `persist_session: true`
+to retain a session, then pass `RunResult::session_id` as `resume` in a later
+request with the same `cwd`. OpenCode manages persistence itself; Devin does
+not support session resumption.
 
-| | Persist | Resume | Unknown session |
+| Provider | Persist | Resume | Unknown session |
 |---|---|---|---|
 | Claude | drops `--no-session-persistence` | `--resume <id>` | `Error::SessionNotFound` |
 | Codex | drops `--ephemeral` | `codex exec resume <id>` (sandbox via `-c sandbox_mode`) | `Error::SessionNotFound` |
@@ -143,7 +141,11 @@ then pass `RunResult::session_id` as `resume` in a later request with the same `
 `AgentEvent::Text` (whole messages from Codex and OpenCode) and `AgentEvent::ToolUse { name }`
 (web searches, MCP tools). The final `RunResult` is the same as without events.
 
-## Structured errors
+## Structured output and errors
+
+Set `RunRequest::json_schema` to request native JSON Schema enforcement from
+Claude or Codex. Devin and OpenCode return text for your application to validate.
+`RunResult::usage` is `None` when token usage is unavailable or incomplete.
 
 Use `discover_with_context`, `with_binary_with_context`, and
 `run_with_context` when the caller needs the selected provider alongside a
@@ -151,7 +153,16 @@ failure. `ProviderError` exposes `provider` and the original `source: Error`;
 `exit_code()` and `stderr_tail()` read the fields of an `Error::Exit` without
 parsing its display text. The original methods remain available.
 
-## Real CLI smoke tests
+## Development
+
+Run the automated tests with fake CLIs, without using provider quota:
+
+```sh
+cargo fmt --check
+cargo test --locked
+```
+
+### Real CLI smoke tests
 
 The opt-in smoke tests make one short request per provider. Set the model to
 one supported by your authenticated CLI, then run a single test:
@@ -167,31 +178,6 @@ Claude and Codex receive a native JSON Schema; Devin and OpenCode output is
 checked as JSON by the test because their adapters do not enforce schemas.
 The regular `cargo test` suite uses fake CLIs and does not make real calls.
 
-## Releases
-
-Release tags use `vMAJOR.MINOR.PATCH` and must match the version in
-`Cargo.toml`. After updating `Cargo.toml`, `Cargo.lock`, and the README's
-dependency example, publish to crates.io, then push the commit and its tag:
-
-```sh
-cargo publish --locked
-git tag -a v0.4.1 -m 'agent-call v0.4.1'
-git push origin main v0.4.1
-```
-
-The [release workflow](.github/workflows/release.yml) tests and packages the
-tagged crate, then creates a GitHub Release. Its body and attached
-`CHANGELOG.md` list every commit since the previous version tag, including
-commits made outside pull requests. To create a GitHub Release for an existing
-tag, run the Release workflow manually and enter the tag. Re-running the
-workflow for the same tag is safe.
-The workflow creates GitHub Releases; crates.io publishing uses `cargo publish`.
-
-Claude and Codex accept an optional `json_schema` and enforce it through their
-native CLI flags. Devin and OpenCode return text for the caller to validate.
-`RunResult::usage` is `None` when usage is unavailable or incomplete. For the
-exact command and output contracts, see [SPEC.md](SPEC.md).
-
 ## Execution behavior
 
 Each request starts a new CLI process. A timeout or cancellation terminates
@@ -200,4 +186,30 @@ that process; the library does not retry automatically. Claude uses
 permission mode, and OpenCode follows its headless permission defaults without
 `--auto`.
 
-License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+## Releases
+
+The Rust crate is published on [crates.io](https://crates.io/crates/agent-call).
+GitHub Releases provide version tags and changelogs. GitHub's Packages sidebar
+is separate from crates.io and does not list this crate.
+
+For maintainers: update `Cargo.toml`, `Cargo.lock`, and the dependency example
+above, commit the changes, then test and publish from a clean working tree:
+
+```sh
+cargo test --locked
+cargo publish --dry-run --locked
+cargo publish --locked
+version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+git tag -a "v$version" -m "agent-call v$version"
+git push origin HEAD:main "v$version"
+```
+
+The [release workflow](.github/workflows/release.yml) tests and packages the
+tagged crate, then creates a GitHub Release with a changelog of commits since
+the previous tag. It does not publish to crates.io. To create a GitHub Release
+for an existing tag, run the workflow manually with that tag. Re-running it
+for the same tag is safe.
+
+## License
+
+Licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
