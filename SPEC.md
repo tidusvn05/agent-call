@@ -1,6 +1,6 @@
-# agent-core 0.4 specification
+# agent-call 0.4 specification
 
-`agent-core` is a Rust library for one-shot calls to four installed agent CLIs.
+`agent-call` is a Rust library for one-shot calls to four installed agent CLIs.
 It does not start or manage a persistent chat session. Authentication is owned
 by each CLI. A caller supplies a prompt, working directory, optional model,
 timeout, optional JSON Schema, and names of child environment variables to

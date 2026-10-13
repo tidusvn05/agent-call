@@ -1,6 +1,6 @@
-# agent-core
+# agent-call
 
-`agent-core` is a Rust library for one-shot calls to four local agent CLIs:
+`agent-call` is a Rust library for one-shot calls to four local agent CLIs:
 Claude, Codex, Devin, and OpenCode v2. It uses each CLI's saved authentication
 and starts a fresh process for every request. The caller supplies a prompt and
 gets final text, elapsed time, and token usage when the CLI reports it.
@@ -16,14 +16,14 @@ application needs to remove environment variables before spawning the CLI.
 
 ```toml
 [dependencies]
-agent-core = { git = "https://github.com/tidusvn05/agent-core", tag = "v0.4.0" }
+agent-call = "0.4.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
 ## Run a prompt
 
 ```rust
-use agent_core::{AgentCli, Provider, RunRequest};
+use agent_call::{AgentCli, Provider, RunRequest};
 use std::time::Duration;
 
 #[tokio::main(flavor = "current_thread")]
@@ -92,7 +92,7 @@ execution.
 | `Web` | `McpOnly` plus built-in web search and fetch | ✅ | ✅ | `InvalidRequest` |
 
 ```rust
-use agent_core::{McpServer, RunRequest, ToolPolicy};
+use agent_call::{McpServer, RunRequest, ToolPolicy};
 
 let request = RunRequest {
     prompt: user_message,
@@ -157,7 +157,7 @@ The opt-in smoke tests make one short request per provider. Set the model to
 one supported by your authenticated CLI, then run a single test:
 
 ```sh
-AGENT_CORE_CODEX_MODEL='gpt-5.6-sol@high' \
+AGENT_CALL_CODEX_MODEL='gpt-5.6-sol@high' \
   cargo test --test real_cli_smoke codex -- --ignored
 ```
 
@@ -171,18 +171,21 @@ The regular `cargo test` suite uses fake CLIs and does not make real calls.
 
 Release tags use `vMAJOR.MINOR.PATCH` and must match the version in
 `Cargo.toml`. After updating `Cargo.toml`, `Cargo.lock`, and the README's
-dependency example, push the commit and its tag:
+dependency example, publish to crates.io, then push the commit and its tag:
 
 ```sh
-git tag -a v0.4.0 -m 'agent-core v0.4.0'
-git push origin main v0.4.0
+cargo publish --locked
+git tag -a v0.4.1 -m 'agent-call v0.4.1'
+git push origin main v0.4.1
 ```
 
 The [release workflow](.github/workflows/release.yml) tests and packages the
 tagged crate, then creates a GitHub Release. Its body and attached
 `CHANGELOG.md` list every commit since the previous version tag, including
-commits made outside pull requests. To publish an existing tag, run the Release
-workflow manually and enter the tag. Publishing the same tag again is safe.
+commits made outside pull requests. To create a GitHub Release for an existing
+tag, run the Release workflow manually and enter the tag. Re-running the
+workflow for the same tag is safe.
+The workflow creates GitHub Releases; crates.io publishing uses `cargo publish`.
 
 Claude and Codex accept an optional `json_schema` and enforce it through their
 native CLI flags. Devin and OpenCode return text for the caller to validate.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 tag=${1:?usage: release_notes.sh TAG OUTPUT}
 output=${2:?usage: release_notes.sh TAG OUTPUT}
-repository=${REPOSITORY:-tidusvn05/agent-core}
+repository=${REPOSITORY:-tidusvn05/agent-call}
 commit=$(git rev-parse "refs/tags/$tag^{commit}")
 
 previous=''

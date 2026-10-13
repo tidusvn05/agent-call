@@ -1,10 +1,10 @@
 //! Opt-in, one-call smoke tests for authenticated CLI installations.
-//! Set the provider's AGENT_CORE_<NAME>_MODEL before running its ignored test.
+//! Set the provider's AGENT_CALL_<NAME>_MODEL before running its ignored test.
 //! Run one test at a time with `cargo test --test real_cli_smoke <name> -- --ignored`.
 
 use std::time::Duration;
 
-use agent_core::{AgentCli, Provider, RunRequest};
+use agent_call::{AgentCli, Provider, RunRequest};
 use serde_json::{Value, json};
 
 async fn smoke(provider: Provider, model_key: &str, name: &str) {
@@ -49,19 +49,19 @@ async fn smoke(provider: Provider, model_key: &str, name: &str) {
 #[tokio::test]
 #[ignore = "real authenticated Claude CLI call"]
 async fn claude() {
-    smoke(Provider::Claude, "AGENT_CORE_CLAUDE_MODEL", "claude").await;
+    smoke(Provider::Claude, "AGENT_CALL_CLAUDE_MODEL", "claude").await;
 }
 
 #[tokio::test]
 #[ignore = "real authenticated Codex CLI call"]
 async fn codex() {
-    smoke(Provider::Codex, "AGENT_CORE_CODEX_MODEL", "codex").await;
+    smoke(Provider::Codex, "AGENT_CALL_CODEX_MODEL", "codex").await;
 }
 
 #[tokio::test]
 #[ignore = "real authenticated Devin CLI call"]
 async fn devin() {
-    smoke(Provider::Devin, "AGENT_CORE_DEVIN_MODEL", "devin").await;
+    smoke(Provider::Devin, "AGENT_CALL_DEVIN_MODEL", "devin").await;
 }
 
 #[tokio::test]
@@ -69,14 +69,14 @@ async fn devin() {
 async fn opencode() {
     smoke(
         Provider::OpenCodeV2,
-        "AGENT_CORE_OPENCODE_MODEL",
+        "AGENT_CALL_OPENCODE_MODEL",
         "opencode",
     )
     .await;
 }
 
 /// A restricted run must not read a file in its working directory, even when asked to.
-async fn cannot_read_files(provider: Provider, policy: agent_core::ToolPolicy) {
+async fn cannot_read_files(provider: Provider, policy: agent_call::ToolPolicy) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("secret.txt"), "SECRET-7731").unwrap();
     let cli = AgentCli::discover_with_context(provider).unwrap();
@@ -104,15 +104,15 @@ async fn cannot_read_files(provider: Provider, policy: agent_core::ToolPolicy) {
 #[tokio::test]
 #[ignore = "uses the authenticated Claude CLI"]
 async fn claude_restricted_runs_cannot_read_files() {
-    cannot_read_files(Provider::Claude, agent_core::ToolPolicy::McpOnly).await;
-    cannot_read_files(Provider::Claude, agent_core::ToolPolicy::Web).await;
+    cannot_read_files(Provider::Claude, agent_call::ToolPolicy::McpOnly).await;
+    cannot_read_files(Provider::Claude, agent_call::ToolPolicy::Web).await;
 }
 
 #[tokio::test]
 #[ignore = "uses the authenticated Codex CLI"]
 async fn codex_restricted_runs_cannot_read_files() {
-    cannot_read_files(Provider::Codex, agent_core::ToolPolicy::McpOnly).await;
-    cannot_read_files(Provider::Codex, agent_core::ToolPolicy::Web).await;
+    cannot_read_files(Provider::Codex, agent_call::ToolPolicy::McpOnly).await;
+    cannot_read_files(Provider::Codex, agent_call::ToolPolicy::Web).await;
 }
 
 /// A persisted session can be resumed, and progress events arrive while it runs.
@@ -124,7 +124,7 @@ async fn resumes_with_events(provider: Provider) {
             prompt: "Remember the number 4127. Reply with just OK.".into(),
             cwd: dir.path().to_path_buf(),
             timeout: Duration::from_secs(180),
-            tool_policy: agent_core::ToolPolicy::McpOnly,
+            tool_policy: agent_call::ToolPolicy::McpOnly,
             persist_session: true,
             ..RunRequest::default()
         })
@@ -138,9 +138,9 @@ async fn resumes_with_events(provider: Provider) {
             prompt: "Which number did I ask you to remember? Reply with just the number.".into(),
             cwd: dir.path().to_path_buf(),
             timeout: Duration::from_secs(180),
-            tool_policy: agent_core::ToolPolicy::McpOnly,
+            tool_policy: agent_call::ToolPolicy::McpOnly,
             resume: Some(session),
-            on_event: Some(agent_core::EventHandler::new(move |e| {
+            on_event: Some(agent_call::EventHandler::new(move |e| {
                 sink.lock().unwrap().push(e)
             })),
             ..RunRequest::default()
@@ -172,7 +172,7 @@ async fn resumed_restricted_run_cannot_read_files(provider: Provider) {
         prompt: prompt.into(),
         cwd: dir.path().to_path_buf(),
         timeout: Duration::from_secs(180),
-        tool_policy: agent_core::ToolPolicy::McpOnly,
+        tool_policy: agent_call::ToolPolicy::McpOnly,
         persist_session: true,
         ..RunRequest::default()
     };

@@ -50,7 +50,7 @@ jobs:
           tagged_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
           test "$(git rev-parse HEAD)" = "$tagged_commit"
           crate_version=$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[] | select(.name == "agent-core") | .version')
+            jq -r '.packages[0].version')
           test "$RELEASE_TAG" = "v$crate_version" || {
             echo "Tag $RELEASE_TAG does not match Cargo.toml version $crate_version" >&2
             exit 1
@@ -82,5 +82,5 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" CHANGELOG.md \
             --verify-tag \
-            --title "agent-core $RELEASE_TAG" \
+            --title "agent-call $RELEASE_TAG" \
             --notes-file CHANGELOG.md

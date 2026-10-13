@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use agent_core::{AgentCli, Provider, RunRequest};
+use agent_call::{AgentCli, Provider, RunRequest};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

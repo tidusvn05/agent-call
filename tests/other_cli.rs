@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use agent_core::{
+use agent_call::{
     AgentCli, AgentEvent, Error, EventHandler, McpServer, Provider, RunRequest, ToolPolicy,
 };
 use std::sync::{Arc, Mutex};

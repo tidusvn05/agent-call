@@ -1,10 +1,14 @@
 [package]
-name = "agent-core"
-version = "0.4.0"
+name = "agent-call"
+version = "0.4.1"
 edition = "2024"
 description = "Rust adapters for one-shot Claude, Codex, Devin, and OpenCode v2 CLI runs"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/tidusvn05/agent-core"
+repository = "https://github.com/tidusvn05/agent-call"
+readme = "README.md"
+keywords = ["agent", "cli", "claude", "codex", "opencode"]
+categories = ["api-bindings", "asynchronous"]
+exclude = [".github/**", "scripts/**"]
 
 [dependencies]
 serde_json = "1"

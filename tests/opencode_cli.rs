@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use agent_core::{Error, OpenCodeV2, RunRequest, TokenUsage};
+use agent_call::{Error, OpenCodeV2, RunRequest, TokenUsage};
 
 fn fake_cli(dir: &Path, body: &str) -> std::path::PathBuf {
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -134,7 +134,7 @@ async fn refuses_tool_policies_and_mcp() {
     let dir = tempfile::tempdir().unwrap();
     let cli = OpenCodeV2::with_binary(fake_cli(dir.path(), "echo should-not-run; exit 9")).unwrap();
     let req = RunRequest {
-        tool_policy: agent_core::ToolPolicy::McpOnly,
+        tool_policy: agent_call::ToolPolicy::McpOnly,
         ..request(dir.path())
     };
     assert!(matches!(cli.run(req).await, Err(Error::InvalidRequest(_))));
