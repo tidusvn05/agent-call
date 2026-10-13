@@ -29,7 +29,7 @@ Add the published crate:
 
 ```toml
 [dependencies]
-agent-call = "0.4.1"
+agent-call = "0.4.2"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 

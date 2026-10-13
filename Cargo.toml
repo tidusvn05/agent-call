@@ -1,6 +1,6 @@
 [package]
 name = "agent-call"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Rust adapters for one-shot Claude, Codex, Devin, and OpenCode v2 CLI runs"
 license = "MIT OR Apache-2.0"
