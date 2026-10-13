@@ -660,6 +660,12 @@ fn codex_tools(command: &mut Command, request: &RunRequest) {
                 toml_string(var)
             ));
         }
+        // `codex exec` never asks for approval: without this, Codex rejects every call to the
+        // request's servers ("requires approval"). The caller chose these servers for this run.
+        command.arg("-c").arg(format!(
+            "mcp_servers.{}.default_tools_approval_mode=\"approve\"",
+            server.name
+        ));
     }
 }
 
