@@ -26,7 +26,7 @@ GitHub **pre-release only** (including archives/checksums); it publishes neither
 ## Versioning and tools
 
 - One version in `[workspace.package]`, inherited by member packages. `main` normally carries the
-  next minor version with `-dev` (currently `0.5.0-dev`); release preparation temporarily removes it.
+  next minor version with `-dev` (currently `0.6.0-dev`); release preparation temporarily removes it.
 - Use [Conventional Commits](https://www.conventionalcommits.org/), such as `feat:`, `fix:`, and
   `chore(release):`. git-cliff writes CHANGELOG.md and release notes using `cliff.toml`. Historical
   commits without a conventional prefix remain in the changelog.
