@@ -192,23 +192,9 @@ The Rust crate is published on [crates.io](https://crates.io/crates/agent-call).
 GitHub Releases provide version tags and changelogs. GitHub's Packages sidebar
 is separate from crates.io and does not list this crate.
 
-For maintainers: update `Cargo.toml`, `Cargo.lock`, and the dependency example
-above, commit the changes, then test and publish from a clean working tree:
-
-```sh
-cargo test --locked
-cargo publish --dry-run --locked
-cargo publish --locked
-version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-git tag -a "v$version" -m "agent-call v$version"
-git push origin HEAD:main "v$version"
-```
-
-The [release workflow](.github/workflows/release.yml) tests and packages the
-tagged crate, then creates a GitHub Release with a changelog of commits since
-the previous tag. It does not publish to crates.io. To create a GitHub Release
-for an existing tag, run the workflow manually with that tag. Re-running it
-for the same tag is safe.
+For maintainers, see [docs/releasing.md](docs/releasing.md) for the tag-driven release
+process, Trusted Publishing setup, and recovery steps. Use Conventional Commits;
+`git-cliff` generates the changelog. `main` carries the next version with `-dev`.
 
 ## License
 
