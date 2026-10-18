@@ -4,6 +4,12 @@ All notable changes to agent-call are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and agent-call uses
 [Semantic Versioning](https://semver.org/) (see docs/releasing.md). This file is generated from commit messages by git-cliff.
 
+## [0.5.0] - 2026-10-18
+
+### Continuous integration
+
+- standardize tag-driven releases with trusted publishing (#10) (1ca73c9)
+
 ## [0.4.2] - 2026-10-13
 
 ### Other changes
