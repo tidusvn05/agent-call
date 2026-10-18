@@ -1,86 +1,244 @@
+# Adapted from tidusvn05/okbot; see docs/releasing.md.
 name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing version tag to release
-        required: true
-        type: string
+    tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out release automation
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          path: automation
-          persist-credentials: false
+env:
+  CARGO_TERM_COLOR: always
 
-      - name: Check out tagged source
-        uses: actions/checkout@v5
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      binary: ${{ steps.tag.outputs.binary }}
+      dockerfile: ${{ steps.tag.outputs.dockerfile }}
+    steps:
+      - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          path: source
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Verify tag and crate version
-        working-directory: source
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate tag, main ancestry, version and changelog
+        id: tag
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "Expected a vMAJOR.MINOR.PATCH tag: $RELEASE_TAG" >&2
-            exit 1
-          }
-          tagged_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
-          test "$(git rev-parse HEAD)" = "$tagged_commit"
-          crate_version=$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[0].version')
-          test "$RELEASE_TAG" = "v$crate_version" || {
-            echo "Tag $RELEASE_TAG does not match Cargo.toml version $crate_version" >&2
-            exit 1
-          }
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          spec = importlib.util.spec_from_file_location('release', 'scripts/release.py')
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.(?:0|[1-9][0-9]*))?', tag):
+              raise SystemExit('Expected vX.Y.Z or vX.Y.Z-rc.N')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', 'HEAD', 'origin/main'], check=True)
+          _, version = release.publish_order()
+          if tag != 'v' + version:
+              raise SystemExit(f'Tag {tag} does not match Cargo.toml version {version}')
+          if not re.search(r'^## \[' + re.escape(version) + r'\](?:\s|$)', Path('CHANGELOG.md').read_text(), re.M):
+              raise SystemExit(f'CHANGELOG.md has no section for {version}')
+          meta = release.metadata()
+          binary = any('bin' in target['kind'] for p in meta['packages']
+                       if p['id'] in meta['workspace_members'] for target in p['targets'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key, value in dict(tag=tag, version=version, prerelease='-' in version,
+                                     binary=binary, dockerfile=Path('Dockerfile').is_file()).items():
+                  print(f'{key}={str(value).lower() if isinstance(value, bool) else value}', file=out)
+          PY
+      - name: Install dependency audit tool
+        run: cargo install cargo-audit --locked
+      - run: scripts/verify.sh
+      - run: scripts/release.py publish --dry-run
 
-      - name: Test and package
-        working-directory: source
-        run: |
-          cargo test --locked
-          cargo package --locked
-
-      - name: Generate changelog
-        working-directory: source
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    if: needs.check.outputs.binary == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-14 }
+          - { target: aarch64-apple-darwin, os: macos-14 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --workspace --bins --release --locked --target ${{ matrix.target }}
+      - name: Package binaries
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-          REPOSITORY: ${{ github.repository }}
-        run: bash ../automation/scripts/release_notes.sh "$RELEASE_TAG" ../automation/CHANGELOG.md
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="${GITHUB_REPOSITORY##*/}-$RELEASE_TAG-$TARGET"
+          mkdir -p "dist/$name"
+          cargo metadata --no-deps --format-version 1 | python3 -c '
+          import json, sys
+          m = json.load(sys.stdin)
+          for p in m["packages"]:
+              if p["id"] in m["workspace_members"]:
+                  for t in p["targets"]:
+                      if "bin" in t["kind"]: print(t["name"])
+          ' > /tmp/binaries
+          while IFS= read -r binary; do
+            cp "target/$TARGET/release/$binary" "dist/$name/"
+          done < /tmp/binaries
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
-      - name: Publish GitHub Release
-        working-directory: automation
+  release:
+    name: Publish the GitHub release
+    needs: [check, build]
+    # A library has no binary build; a failed build must still block the release.
+    if: >-
+      always() && needs.check.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Preserve an existing release and its checksums on reruns
+        id: existing
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
         run: |
-          set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists"
-            exit 0
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo 'Release already exists; leaving its notes and assets unchanged.'
           fi
-          gh release create "$RELEASE_TAG" CHANGELOG.md \
-            --verify-tag \
-            --title "agent-call $RELEASE_TAG" \
-            --notes-file CHANGELOG.md
+      - uses: actions/download-artifact@v8
+        if: steps.existing.outputs.exists != 'true' && needs.check.outputs.binary == 'true'
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - name: Source archives and checksums
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          mkdir -p dist
+          name="${GITHUB_REPOSITORY##*/}-$RELEASE_TAG-source"
+          git archive --format=tar.gz --prefix="$name/" -o "dist/$name.tar.gz" HEAD
+          git archive --format=zip --prefix="$name/" -o "dist/$name.zip" HEAD
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
+      - name: Release notes from conventional commits
+        if: steps.existing.outputs.exists != 'true'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --current --strip header
+        env:
+          OUTPUT: NOTES.md
+      - name: Create the GitHub release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/* --verify-tag \
+            --title "${GITHUB_REPOSITORY##*/} $RELEASE_TAG" --notes-file NOTES.md "${flags[@]}"
+
+  image:
+    name: Container image
+    needs: [check, release]
+    if: >-
+      always() && needs.check.result == 'success' && needs.release.result == 'success' &&
+      needs.check.outputs.dockerfile == 'true' && needs.check.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.check.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+
+  crates:
+    name: Publish to crates.io
+    needs: [check, release]
+    if: >-
+      always() && needs.check.result == 'success' && needs.release.result == 'success' &&
+      needs.check.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Crates to publish
+        id: pending
+        run: scripts/release.py pending
+      - name: New crates need a manual first publish
+        if: steps.pending.outputs.new != ''
+        env:
+          NEW_CRATES: ${{ steps.pending.outputs.new }}
+        run: |
+          echo "::error::New crates: $NEW_CRATES. Trusted Publishing cannot create crates. Publish once by hand, configure trustpub --only, revoke the temporary token, then rerun (docs/releasing.md)."
+          exit 1
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+        if: steps.pending.outputs.count != '0'
+      - run: scripts/release.py publish
+        if: steps.pending.outputs.count != '0'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
