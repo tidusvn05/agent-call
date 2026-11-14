@@ -596,6 +596,12 @@ fn claude_tools(command: &mut Command, request: &RunRequest) {
         command.arg("--strict-mcp-config");
         // Untrusted prompts must not invoke skills or custom commands with `/name`.
         command.arg("--disable-slash-commands");
+        // Claude Code adds the git status of `cwd` (branch, recent commit titles, changed files)
+        // to the system context. A restricted run serves untrusted prompts and must not see the
+        // host's repository state.
+        command
+            .arg("--settings")
+            .arg(r#"{"includeGitInstructions":false}"#);
         let builtin = match request.tool_policy {
             ToolPolicy::Web => CLAUDE_WEB_TOOLS,
             _ => "",
