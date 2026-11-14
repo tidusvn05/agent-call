@@ -292,6 +292,7 @@ async fn claude_default_policy_keeps_previous_flags() {
     let a = args(dir.path());
     assert_eq!(after(&a, "--permission-mode"), ["bypassPermissions"]);
     assert!(!a.iter().any(|x| x == "--tools"
+        || x == "--settings"
         || x == "--mcp-config"
         || x == "--append-system-prompt"
         || x == "--disable-slash-commands"));
@@ -322,6 +323,11 @@ async fn claude_mcp_only() {
     assert_eq!(after(&a, "--allowedTools"), ["mcp__kb"]);
     assert!(a.iter().any(|x| x == "--strict-mcp-config"));
     assert!(a.iter().any(|x| x == "--disable-slash-commands"));
+    assert_eq!(
+        after(&a, "--settings"),
+        [r#"{"includeGitInstructions":false}"#],
+        "no git status of the host repository"
+    );
     let config: serde_json::Value = serde_json::from_str(after(&a, "--mcp-config")[0]).unwrap();
     assert_eq!(
         config["mcpServers"]["kb"]["url"],
@@ -390,6 +396,10 @@ async fn claude_web() {
     assert_eq!(after(&a, "--tools"), ["WebSearch,WebFetch"]);
     assert_eq!(after(&a, "--allowedTools"), ["mcp__kb,WebSearch,WebFetch"]);
     assert_eq!(after(&a, "--permission-mode"), ["dontAsk"]);
+    assert_eq!(
+        after(&a, "--settings"),
+        [r#"{"includeGitInstructions":false}"#]
+    );
 }
 
 #[tokio::test]
