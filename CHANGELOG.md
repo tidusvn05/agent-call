@@ -4,6 +4,12 @@ All notable changes to agent-call are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and agent-call uses
 [Semantic Versioning](https://semver.org/) (see docs/releasing.md). This file is generated from commit messages by git-cliff.
 
+## [0.5.1] - 2026-11-14
+
+### Bug fixes
+
+- **claude:** keep the git status of cwd out of restricted runs (#13) (4f1edc6)
+
 ## [0.5.0] - 2026-10-18
 
 ### Continuous integration
